@@ -227,11 +227,16 @@ func (v *KeywordsVectorHybridRetrieveEngineService) concurrentBatchSaveNoEmbeddi
 	ctx context.Context,
 	chunks [][]*types.IndexInfo,
 ) error {
+	totalBatches := len(chunks)
 	g, ctx := errgroup.WithContext(ctx)
-	for _, indexChunk := range chunks {
+	for i, indexChunk := range chunks {
 		g.Go(func() error {
 			params := make(map[string]any)
-			return v.indexRepository.BatchSave(ctx, indexChunk, params)
+			if err := v.indexRepository.BatchSave(ctx, indexChunk, params); err != nil {
+				return err
+			}
+			logger.Infof(ctx, "BatchIndex: batch %d/%d saved (size=%d)", i+1, totalBatches, len(indexChunk))
+			return nil
 		})
 	}
 	return g.Wait()
@@ -243,10 +248,11 @@ func (v *KeywordsVectorHybridRetrieveEngineService) boundedConcurrentBatchSaveNo
 	chunks [][]*types.IndexInfo,
 	maxConcurrency int,
 ) error {
+	totalBatches := len(chunks)
 	g, ctx := errgroup.WithContext(ctx)
 	sem := make(chan struct{}, maxConcurrency)
 
-	for _, indexChunk := range chunks {
+	for i, indexChunk := range chunks {
 		g.Go(func() error {
 			select {
 			case sem <- struct{}{}:
@@ -256,7 +262,11 @@ func (v *KeywordsVectorHybridRetrieveEngineService) boundedConcurrentBatchSaveNo
 			}
 
 			params := make(map[string]any)
-			return v.indexRepository.BatchSave(ctx, indexChunk, params)
+			if err := v.indexRepository.BatchSave(ctx, indexChunk, params); err != nil {
+				return err
+			}
+			logger.Infof(ctx, "BatchIndex: batch %d/%d saved (size=%d)", i+1, totalBatches, len(indexChunk))
+			return nil
 		})
 	}
 	return g.Wait()
