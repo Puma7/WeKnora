@@ -30,10 +30,17 @@ type KnowledgeWatchdog struct {
 // scan threshold (5 min) and per-tick row limit (100) are intentionally
 // not exposed via config — they are sized against the heartbeat interval
 // and the practical "what's worth a single warn line" cutoff.
+//
+// SkipIfStillRunning prevents goroutine pile-up: if a scan is slow
+// (e.g. table-scan during DB pressure) the next 5-minute tick is
+// skipped rather than starting a parallel scan. Robfig/cron runs each
+// entry in its own goroutine by default, so without this guard a
+// genuinely slow scan would compound DB load instead of waiting it out.
 func NewKnowledgeWatchdog(repo interfaces.KnowledgeRepository) *KnowledgeWatchdog {
 	return &KnowledgeWatchdog{
 		repo: repo,
 		cron: cron.New(cron.WithChain(
+			cron.SkipIfStillRunning(cron.DefaultLogger),
 			cron.Recover(cron.DefaultLogger),
 		)),
 		threshold: 5 * time.Minute,
@@ -46,7 +53,11 @@ func NewKnowledgeWatchdog(repo interfaces.KnowledgeRepository) *KnowledgeWatchdo
 // errors out of the goroutine — they are logged and the next tick retries.
 func (w *KnowledgeWatchdog) Start(ctx context.Context) error {
 	_, err := w.cron.AddFunc("@every 5m", func() {
-		w.scan(context.Background())
+		// Bound scan duration so a wedged DB connection cannot hold the
+		// SkipIfStillRunning slot indefinitely and starve future ticks.
+		scanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		w.scan(scanCtx)
 	})
 	if err != nil {
 		return err
