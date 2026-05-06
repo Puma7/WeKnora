@@ -150,8 +150,11 @@ func (s *KnowledgePostProcessService) enqueueSummaryGenerationTask(ctx context.C
 		return
 	}
 
+	// 30 min matches Asynq's previous implicit default — slow self-hosted
+	// LLMs and rate-limited APIs routinely sit between 15 and 30 min, so a
+	// 15-minute cap would surface as a regression for those tenants.
 	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes,
-		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(15*time.Minute))
+		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		logger.Warnf(ctx, "[KnowledgePostProcess] Failed to enqueue summary generation for %s: %v", payload.KnowledgeID, err)
 	} else {
@@ -190,8 +193,12 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationIfEnabled(ctx con
 		return
 	}
 
+	// 30 min: Q-Gen is N serial LLM calls (one per question slot up to
+	// QuestionCount). On slow LLMs that easily exceeds 15 min for a single
+	// knowledge with QuestionCount=10. Match Asynq's previous default to
+	// avoid silently regressing those tenants.
 	task := asynq.NewTask(types.TypeQuestionGeneration, payloadBytes,
-		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(15*time.Minute))
+		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		logger.Warnf(ctx, "[KnowledgePostProcess] Failed to enqueue question generation for %s: %v", payload.KnowledgeID, err)
 	} else {
