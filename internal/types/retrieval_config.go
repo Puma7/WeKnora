@@ -35,6 +35,14 @@ type RetrievalConfig struct {
 	RRFVectorWeight float64 `json:"rrf_vector_weight,omitempty"`
 	// RRFKeywordWeight is the keyword counterpart. Default: 0.3.
 	RRFKeywordWeight float64 `json:"rrf_keyword_weight,omitempty"`
+
+	// OverRetrieveMultiplier scales the candidate-pool size handed to RRF
+	// fusion and reranking. Effective vector top-K is
+	//   max(SearchParams.MatchCount*multiplier, 50) * len(searchKBIDs)
+	// capped at 500. Higher values trade indexing-call cost for recall
+	// because the reranker has more room to surface long-tail hits.
+	// Default: 5. Sensible range: 3..15.
+	OverRetrieveMultiplier int `json:"over_retrieve_multiplier,omitempty"`
 }
 
 // GetEffectiveEmbeddingTopK returns EmbeddingTopK with a fallback default.
@@ -75,6 +83,17 @@ func (c *RetrievalConfig) GetEffectiveRerankThreshold() float64 {
 		return 0.2
 	}
 	return c.RerankThreshold
+}
+
+// GetEffectiveOverRetrieveMultiplier returns the over-retrieval multiplier
+// with a fallback default of 5. Values outside the documented 3..15 range
+// are accepted because the upstream 500-candidate cap already limits the
+// blast radius of an aggressive setting.
+func (c *RetrievalConfig) GetEffectiveOverRetrieveMultiplier() int {
+	if c == nil || c.OverRetrieveMultiplier <= 0 {
+		return 5
+	}
+	return c.OverRetrieveMultiplier
 }
 
 // GetEffectiveRerankModelID returns the rerank model ID to use for retrieval.
