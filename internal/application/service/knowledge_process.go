@@ -446,6 +446,15 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		return
 	}
 
+	// Mark progress so the reconciler/UI sees concrete numbers and the
+	// heartbeat advances past the initial transition timestamp.
+	if err := s.repo.SetChunkProgress(ctx, knowledge.ID, len(textChunks), len(textChunks)); err != nil {
+		logger.GetLogger(ctx).WithField("error", err).Warnf("processChunks set chunk progress failed")
+	}
+	if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
+		logger.GetLogger(ctx).WithField("error", err).Warnf("processChunks heartbeat failed")
+	}
+
 	// Create index information and perform vector indexing — only when vector/keyword is enabled.
 	// Chunks are ALWAYS saved to DB (above) because wiki and graph need them even without vector indexing.
 	var totalStorageSize int64
@@ -587,9 +596,14 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		langfuse.InjectTracing(ctx, &postProcessPayload)
 		payloadBytes, err := json.Marshal(postProcessPayload)
 		if err == nil {
-			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, postProcessOpts()...)
+			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes,
+				postProcessOpts(asynq.TaskID(PostProcessTaskID(knowledge.ID)))...)
 			if _, err := s.task.Enqueue(task); err != nil {
-				logger.Errorf(ctx, "Failed to enqueue knowledge post process task: %v", err)
+				if IsTaskIDConflict(err) {
+					logger.Infof(ctx, "Post process task already queued for %s, skipping", knowledge.ID)
+				} else {
+					logger.Errorf(ctx, "Failed to enqueue knowledge post process task: %v", err)
+				}
 			} else {
 				logger.Infof(ctx, "Enqueued knowledge post process task for %s", knowledge.ID)
 			}
@@ -1155,6 +1169,11 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		return chunk.Content
 	}
 
+	// Initial AIGS progress so the reconciler/UI sees the planned total.
+	if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, 0, len(textChunks)); err != nil {
+		logger.Warnf(ctx, "Failed to set initial AIGS progress: %v", err)
+	}
+
 	// Generate questions for each chunk with context
 	var indexInfoList []*types.IndexInfo
 	for i, chunk := range textChunks {
@@ -1226,8 +1245,24 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 			})
 		}
 		logger.Debugf(ctx, "Generated %d questions for chunk %s", len(questions), chunk.ID)
+
+		// Heartbeat + progress every 50 chunks. Keeps the row out of the
+		// reconciler's "stuck" set during long QG runs and gives the UI a
+		// live counter.
+		if (i+1)%50 == 0 {
+			if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, i+1, len(textChunks)); err != nil {
+				logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", i+1, err)
+			}
+			if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
+				logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", i+1, err)
+			}
+		}
 	}
 	indexEntriesPrepared = len(indexInfoList)
+	// Final progress update so the row is exactly chunks_done == total.
+	if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, len(textChunks), len(textChunks)); err != nil {
+		logger.Warnf(ctx, "Failed to finalize AIGS progress: %v", err)
+	}
 
 	// Index generated questions
 	if len(indexInfoList) > 0 {
@@ -1436,9 +1471,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(existing.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "Reparse task already queued for %s, skipping", existing.ID)
+				return existing, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue reparse task: %v", err)
 			return existing, nil
 		}
@@ -1489,9 +1529,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(existing.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "File URL reparse task already queued for %s, skipping", existing.ID)
+				return existing, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue file URL reparse task: %v", err)
 			return existing, nil
 		}
@@ -1535,9 +1580,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(existing.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "URL reparse task already queued for %s, skipping", existing.ID)
+				return existing, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue URL reparse task: %v", err)
 			return existing, nil
 		}
@@ -1925,7 +1975,9 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	}
 
 	knowledge.ParseStatus = "processing"
-	knowledge.UpdatedAt = time.Now()
+	now := time.Now()
+	knowledge.UpdatedAt = now
+	knowledge.ProcessingStartedAt = &now
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		logger.Errorf(ctx, "failed to update knowledge status to processing: %v", err)
 		return nil

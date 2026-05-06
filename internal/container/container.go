@@ -225,10 +225,18 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	if redisAvailable {
 		must(container.Provide(router.NewAsyncqClient, dig.As(new(interfaces.TaskEnqueuer))))
 		must(container.Provide(router.NewAsynqServer))
+		// Reconciler scans for rows stuck in parse_status='processing' whose
+		// asynq task is no longer alive (archived after retries or lost in
+		// a crash). Goroutine is launched from RunAsynqServer.
+		must(container.Provide(router.AsynqRedisConnOpt))
+		must(container.Provide(service.NewKnowledgeReconciler))
 	} else {
 		syncExec := router.NewSyncTaskExecutor()
 		must(container.Provide(func() interfaces.TaskEnqueuer { return syncExec }))
 		must(container.Provide(func() *router.SyncTaskExecutor { return syncExec }))
+		// In Lite mode there's no asynq broker, so we provide a nil
+		// reconciler that RunAsynqServer / dig can still depend on.
+		must(container.Provide(func() *service.KnowledgeReconciler { return nil }))
 	}
 
 	// Chat pipeline components for processing chat requests

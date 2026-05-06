@@ -150,9 +150,14 @@ func (s *KnowledgePostProcessService) enqueueSummaryGenerationTask(ctx context.C
 		return
 	}
 
-	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes, summaryOpts()...)
+	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes,
+		summaryOpts(asynq.TaskID(SummaryTaskID(payload.KnowledgeID)))...)
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
-		logger.Warnf(ctx, "[KnowledgePostProcess] Failed to enqueue summary generation for %s: %v", payload.KnowledgeID, err)
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "[KnowledgePostProcess] Summary task already queued for %s, skipping", payload.KnowledgeID)
+		} else {
+			logger.Warnf(ctx, "[KnowledgePostProcess] Failed to enqueue summary generation for %s: %v", payload.KnowledgeID, err)
+		}
 	} else {
 		logger.Infof(ctx, "[KnowledgePostProcess] Enqueued summary generation task for %s", payload.KnowledgeID)
 	}
@@ -189,9 +194,14 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationIfEnabled(ctx con
 		return
 	}
 
-	task := asynq.NewTask(types.TypeQuestionGeneration, payloadBytes, qgOpts()...)
+	task := asynq.NewTask(types.TypeQuestionGeneration, payloadBytes,
+		qgOpts(asynq.TaskID(QGTaskID(payload.KnowledgeID)))...)
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
-		logger.Warnf(ctx, "[KnowledgePostProcess] Failed to enqueue question generation for %s: %v", payload.KnowledgeID, err)
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "[KnowledgePostProcess] QG task already queued for %s, skipping", payload.KnowledgeID)
+		} else {
+			logger.Warnf(ctx, "[KnowledgePostProcess] Failed to enqueue question generation for %s: %v", payload.KnowledgeID, err)
+		}
 	} else {
 		logger.Infof(ctx, "[KnowledgePostProcess] Enqueued question generation task for %s (count=%d)", payload.KnowledgeID, questionCount)
 	}

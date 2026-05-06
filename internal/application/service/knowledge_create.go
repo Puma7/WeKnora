@@ -262,9 +262,14 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+		docProcessOpts(asynq.TaskID(DocProcessTaskID(knowledge.ID)))...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "Document process task already queued for knowledge %s, skipping duplicate enqueue", knowledge.ID)
+			return knowledge, nil
+		}
 		logger.Errorf(ctx, "Failed to enqueue document process task: %v", err)
 		// 即使入队失败，也返回knowledge，因为文件已保存
 		return knowledge, nil
@@ -436,9 +441,14 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+		docProcessOpts(asynq.TaskID(DocProcessTaskID(knowledge.ID)))...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "URL process task already queued for knowledge %s, skipping duplicate enqueue", knowledge.ID)
+			return knowledge, nil
+		}
 		logger.Errorf(ctx, "Failed to enqueue URL process task: %v", err)
 		return knowledge, nil
 	}
@@ -659,9 +669,14 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+		docProcessOpts(asynq.TaskID(DocProcessTaskID(knowledge.ID)))...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "File URL process task already queued for knowledge %s, skipping duplicate enqueue", knowledge.ID)
+			return knowledge, nil
+		}
 		logger.Errorf(ctx, "Failed to enqueue file URL process task: %v", err)
 		return knowledge, nil
 	}
@@ -879,9 +894,14 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 			return knowledge, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(knowledge.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "Passage process task already queued for knowledge %s, skipping duplicate enqueue", knowledge.ID)
+				return knowledge, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue passage process task: %v", err)
 			return knowledge, nil
 		}
@@ -1018,9 +1038,14 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 		return fmt.Errorf("failed to marshal manual process payload: %w", err)
 	}
 
-	task := asynq.NewTask(types.TypeManualProcess, payloadBytes, docProcessOpts()...)
+	task := asynq.NewTask(types.TypeManualProcess, payloadBytes,
+		docProcessOpts(asynq.TaskID(ManualProcessTaskID(knowledge.ID)))...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "Manual process task already queued for knowledge %s, skipping duplicate enqueue", knowledge.ID)
+			return nil
+		}
 		return fmt.Errorf("failed to enqueue manual process task: %w", err)
 	}
 	logger.Infof(ctx, "Enqueued manual process task: knowledge_id=%s, asynq_id=%s", knowledge.ID, info.ID)

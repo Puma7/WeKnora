@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -582,4 +583,72 @@ func (r *knowledgeRepository) ListIDsByTagID(
 		Where("tenant_id = ? AND knowledge_base_id = ? AND tag_id = ?", tenantID, kbID, tagID).
 		Pluck("id", &ids).Error
 	return ids, err
+}
+
+// TouchProcessingHeartbeat sets processing_started_at to NOW() so the
+// reconciler treats the row as live. Cheap (single-row update) and called
+// every chunk-batch / every 50 AIGS chunks during long ingest.
+func (r *knowledgeRepository) TouchProcessingHeartbeat(ctx context.Context, id string) error {
+	now := time.Now()
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ?", id).
+		Update("processing_started_at", now).Error
+}
+
+// SetChunkProgress writes chunks_done/_total in a single UPDATE.
+func (r *knowledgeRepository) SetChunkProgress(ctx context.Context, id string, done, total int) error {
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"chunks_done":  done,
+			"chunks_total": total,
+		}).Error
+}
+
+// SetAIGSProgress writes aigs_chunks_done/_total in a single UPDATE.
+func (r *knowledgeRepository) SetAIGSProgress(ctx context.Context, id string, done, total int) error {
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"aigs_chunks_done":  done,
+			"aigs_chunks_total": total,
+		}).Error
+}
+
+// ListStuckKnowledge returns rows in parse_status='processing' whose
+// heartbeat (processing_started_at) is older than threshold OR is NULL.
+// NULL handling is important: rows that pre-date this migration have no
+// heartbeat — by treating them as "stuck" we let the reconciler settle
+// any historical orphans on its first run.
+func (r *knowledgeRepository) ListStuckKnowledge(
+	ctx context.Context, threshold time.Time, limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out []*types.Knowledge
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("parse_status = ? AND (processing_started_at IS NULL OR processing_started_at < ?)",
+			types.ParseStatusProcessing, threshold).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	return out, err
+}
+
+// ListStuckSummary mirrors ListStuckKnowledge for summary_status.
+func (r *knowledgeRepository) ListStuckSummary(
+	ctx context.Context, threshold time.Time, limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out []*types.Knowledge
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("summary_status = ? AND (processing_started_at IS NULL OR processing_started_at < ?)",
+			types.SummaryStatusProcessing, threshold).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	return out, err
 }

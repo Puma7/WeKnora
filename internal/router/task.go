@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -29,6 +30,15 @@ type AsynqTaskParams struct {
 	ImageMultimodal      interfaces.TaskHandler `name:"imageMultimodal"`
 	KnowledgePostProcess interfaces.TaskHandler `name:"knowledgePostProcess"`
 	WikiIngest           interfaces.TaskHandler `name:"wikiIngest"`
+	Reconciler           *service.KnowledgeReconciler
+}
+
+// AsynqRedisConnOpt exposes the Redis connection options as the
+// asynq.RedisConnOpt interface so other components (notably the
+// KnowledgeReconciler's *asynq.Inspector) can connect to the same
+// broker without re-reading env vars.
+func AsynqRedisConnOpt() asynq.RedisConnOpt {
+	return getAsynqRedisClientOpt()
 }
 
 // envIntDefault reads an integer from an env var, falling back to def when
@@ -195,5 +205,15 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 			log.Fatalf("could not run server: %v", err)
 		}
 	}()
+
+	// Start the KnowledgeReconciler in the background. It detects rows
+	// stuck in parse_status='processing' that no longer have a live
+	// asynq task — e.g. because asynq exhausted retries (archived) or
+	// the worker process crashed mid-execution before lease renewal.
+	// Without this, such rows stay "processing" forever in Redis mode.
+	if params.Reconciler != nil {
+		go params.Reconciler.Run(context.Background())
+	}
+
 	return mux
 }

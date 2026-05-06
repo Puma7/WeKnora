@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"mime/multipart"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
@@ -219,4 +220,18 @@ type KnowledgeRepository interface {
 	SearchKnowledgeInScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error)
 	// ListIDsByTagID returns all knowledge IDs that have the specified tag ID.
 	ListIDsByTagID(ctx context.Context, tenantID uint64, kbID, tagID string) ([]string, error)
+	// TouchProcessingHeartbeat sets processing_started_at to now for the given
+	// knowledge ID. Called by workers periodically during long-running ingest
+	// so the reconciler can distinguish "still working" from "stuck".
+	TouchProcessingHeartbeat(ctx context.Context, id string) error
+	// SetChunkProgress updates chunks_total and chunks_done atomically.
+	SetChunkProgress(ctx context.Context, id string, done, total int) error
+	// SetAIGSProgress updates aigs_chunks_total and aigs_chunks_done atomically.
+	SetAIGSProgress(ctx context.Context, id string, done, total int) error
+	// ListStuckKnowledge returns knowledge rows in parse_status='processing'
+	// whose heartbeat (processing_started_at) is older than threshold. Used
+	// by the reconciler to find candidates for requeue or fail.
+	ListStuckKnowledge(ctx context.Context, threshold time.Time, limit int) ([]*types.Knowledge, error)
+	// ListStuckSummary mirrors ListStuckKnowledge for summary_status.
+	ListStuckSummary(ctx context.Context, threshold time.Time, limit int) ([]*types.Knowledge, error)
 }

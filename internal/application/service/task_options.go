@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -8,6 +9,32 @@ import (
 
 	"github.com/hibiken/asynq"
 )
+
+// Deterministic task IDs let the reconciler distinguish "live task in
+// asynq" from "orphan in DB". They also collapse duplicate enqueues (the
+// same Knowledge being uploaded twice in quick succession or re-enqueued
+// by the reconciler while a previous attempt is still pending) into a
+// single task — see EnqueueIfNotExists.
+//
+// Each helper namespaces by operation so that, e.g., a document-process
+// task and a question-generation task for the same Knowledge can co-exist
+// without colliding.
+
+// DocProcessTaskID returns the deterministic asynq task ID for a
+// TypeDocumentProcess (or TypeManualProcess) task. Used by the reconciler
+// to look up live tasks for a given knowledge.
+func DocProcessTaskID(knowledgeID string) string  { return "doc-process-" + knowledgeID }
+func ManualProcessTaskID(knowledgeID string) string { return "manual-process-" + knowledgeID }
+func PostProcessTaskID(knowledgeID string) string  { return "post-process-" + knowledgeID }
+func QGTaskID(knowledgeID string) string           { return "qg-" + knowledgeID }
+func SummaryTaskID(knowledgeID string) string      { return "summary-" + knowledgeID }
+
+// IsTaskIDConflict reports whether err signals that the task ID is
+// already in use — semantically: "another enqueue already covered this
+// work, so we can treat it as success."
+func IsTaskIDConflict(err error) bool {
+	return errors.Is(err, asynq.ErrTaskIDConflict)
+}
 
 // envDurationDefault parses a duration env var like "30m" or "1800s".
 // Falls back to def when unset, empty, or unparseable.

@@ -427,9 +427,14 @@ func (s *ImageMultimodalService) enqueueKnowledgePostProcessTask(ctx context.Con
 		return
 	}
 
-	task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, postProcessOpts()...)
+	task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes,
+		postProcessOpts(asynq.TaskID(PostProcessTaskID(payload.KnowledgeID)))...)
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
-		logger.Warnf(ctx, "[ImageMultimodal] Failed to enqueue post process task for %s: %v", payload.KnowledgeID, err)
+		if IsTaskIDConflict(err) {
+			logger.Infof(ctx, "[ImageMultimodal] Post process task already queued for %s, skipping", payload.KnowledgeID)
+		} else {
+			logger.Warnf(ctx, "[ImageMultimodal] Failed to enqueue post process task for %s: %v", payload.KnowledgeID, err)
+		}
 	} else {
 		logger.Infof(ctx, "[ImageMultimodal] Enqueued post process task for %s", payload.KnowledgeID)
 	}
