@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -162,6 +163,61 @@ func (r *userRepository) SearchUsers(ctx context.Context, query string, limit in
 		return nil, err
 	}
 	return users, nil
+}
+
+// SearchUsersInTenant scopes the search to a single tenant, used for KB grants
+// and admin user pickers where cross-tenant matches are undesirable.
+func (r *userRepository) SearchUsersInTenant(ctx context.Context, tenantID uint64, query string, limit int) ([]*types.User, error) {
+	var users []*types.User
+	searchPattern := "%" + query + "%"
+
+	dbQuery := r.db.WithContext(ctx).
+		Where("tenant_id = ?", tenantID).
+		Where("username ILIKE ? OR email ILIKE ?", searchPattern, searchPattern).
+		Where("is_active = ?", true).
+		Order("username ASC")
+
+	if limit > 0 {
+		dbQuery = dbQuery.Limit(limit)
+	} else {
+		dbQuery = dbQuery.Limit(20)
+	}
+	if err := dbQuery.Find(&users).Error; err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+// CountActiveOwners returns the number of active owners in a tenant.
+func (r *userRepository) CountActiveOwners(ctx context.Context, tenantID uint64) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&types.User{}).
+		Where("tenant_id = ? AND role = ? AND is_active = ?", tenantID, types.UserRoleOwner, true).
+		Count(&count).Error
+	return count, err
+}
+
+// DemoteOwnerIfSafe runs a single-statement compare-and-set: it changes the
+// user's role to newRole only when at least one OTHER active owner remains.
+// The "other owner" check lives inside the WHERE clause so two concurrent
+// demotions cannot both succeed and leave the tenant ownerless.
+func (r *userRepository) DemoteOwnerIfSafe(ctx context.Context, userID string, tenantID uint64, newRole string) (bool, error) {
+	res := r.db.WithContext(ctx).
+		Model(&types.User{}).
+		Where(
+			"id = ? AND role = ? AND EXISTS (?)",
+			userID, types.UserRoleOwner,
+			r.db.Model(&types.User{}).
+				Select("1").
+				Where("tenant_id = ? AND id <> ? AND role = ? AND is_active = ?",
+					tenantID, userID, types.UserRoleOwner, true),
+		).
+		Updates(map[string]interface{}{"role": newRole, "updated_at": time.Now()})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // authTokenRepository implements auth token repository interface

@@ -1132,6 +1132,7 @@ export default {
     menuItem: "用户权限",
     title: "知识库用户权限",
     hint: "为本知识库授予租户内用户具体的访问权限。",
+    orgShareNote: "提示：通过组织共享授予的访问权限单独管理，此处不显示。",
     searchPlaceholder: "搜索用户名或邮箱",
     searchAction: "搜索",
     searchResults: "搜索结果",

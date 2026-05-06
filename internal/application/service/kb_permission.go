@@ -191,11 +191,16 @@ func (s *kbPermissionService) ListByKB(
 // ResolvePermission returns the highest permission a user holds on a KB.
 //
 // Resolution order (highest wins):
-//  1. Tenant owner/admin -> admin
-//  2. KB owner          -> admin
-//  3. Direct user grant -> as recorded
-//  4. Same tenant       -> viewer (legacy backwards-compat behavior)
-//  5. otherwise         -> none
+//  1. Cross-tenant       -> not handled here (caller falls back to org-share path)
+//  2. Tenant owner/admin -> admin
+//  3. KB owner_id == user-> admin
+//  4. Has explicit grant -> grant level
+//  5. KB has ZERO grants -> viewer (preserves legacy tenant-wide visibility)
+//  6. KB has grants but none for this user -> denied
+//
+// Rule 5+6 together mean: a KB stays tenant-wide-visible until someone adds the
+// first explicit grant; once any grant exists, the KB becomes restricted to the
+// granted users (plus tenant admins/owners and the KB owner).
 func (s *kbPermissionService) ResolvePermission(
 	ctx context.Context, user *types.User, kbID string,
 ) (types.KBPermission, bool, error) {
@@ -233,12 +238,90 @@ func (s *kbPermissionService) ResolvePermission(
 		return "", false, err
 	}
 
-	// Legacy fallback: KBs created before granular permissions kept tenant-wide read access.
-	// We preserve that for KBs without an owner_id; once an owner is set, access becomes opt-in.
-	if kb.OwnerID == "" {
-		return types.KBPermissionViewer, true, nil
+	// No grant for this user. Check if the KB has any grants at all.
+	hasGrants, err := s.repo.KBsWithAnyGrants(ctx, []string{kbID})
+	if err != nil {
+		return "", false, err
 	}
-	return "", false, nil
+	if hasGrants[kbID] {
+		// KB has grants but not for this user -> restricted, no access.
+		return "", false, nil
+	}
+	// No grants exist on this KB anywhere -> tenant-wide viewer access (legacy compat).
+	return types.KBPermissionViewer, true, nil
+}
+
+// FilterAccessibleSameTenant filters a list of KBs to those the user can view.
+//
+// Cross-tenant KBs are passed through unchanged; the caller is expected to apply
+// org-share rules to those. For same-tenant KBs we apply the rules from
+// ResolvePermission but with a single batch DB lookup instead of N queries.
+func (s *kbPermissionService) FilterAccessibleSameTenant(
+	ctx context.Context, user *types.User, kbs []*types.KnowledgeBase,
+) ([]*types.KnowledgeBase, error) {
+	if user == nil {
+		return nil, errors.New("user required")
+	}
+	if len(kbs) == 0 {
+		return kbs, nil
+	}
+
+	// Tenant admins/owners see everything in their tenant; nothing to filter.
+	tenantAdmin := user.Role == types.UserRoleOwner || user.Role == types.UserRoleAdmin
+
+	// Collect same-tenant KB IDs for the batch lookups.
+	sameTenantIDs := make([]string, 0, len(kbs))
+	for _, kb := range kbs {
+		if kb != nil && kb.TenantID == user.TenantID {
+			sameTenantIDs = append(sameTenantIDs, kb.ID)
+		}
+	}
+	if len(sameTenantIDs) == 0 || tenantAdmin {
+		return kbs, nil
+	}
+
+	grants, err := s.repo.ListGrantsForUserInKBs(ctx, user.ID, sameTenantIDs)
+	if err != nil {
+		return nil, err
+	}
+	userGrants := make(map[string]struct{}, len(grants))
+	for _, g := range grants {
+		userGrants[g.KnowledgeBaseID] = struct{}{}
+	}
+
+	hasGrants, err := s.repo.KBsWithAnyGrants(ctx, sameTenantIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*types.KnowledgeBase, 0, len(kbs))
+	for _, kb := range kbs {
+		if kb == nil {
+			continue
+		}
+		// Cross-tenant KB -> caller decides via org-share path.
+		if kb.TenantID != user.TenantID {
+			out = append(out, kb)
+			continue
+		}
+		// KB owner sees their own KBs.
+		if kb.OwnerID != "" && kb.OwnerID == user.ID {
+			out = append(out, kb)
+			continue
+		}
+		// Has explicit grant -> visible.
+		if _, ok := userGrants[kb.ID]; ok {
+			out = append(out, kb)
+			continue
+		}
+		// No grants exist anywhere on this KB -> legacy tenant-wide visibility.
+		if !hasGrants[kb.ID] {
+			out = append(out, kb)
+			continue
+		}
+		// KB has other grants but not for this user -> hidden.
+	}
+	return out, nil
 }
 
 // requireKBAdmin asserts the actor can manage the KB's permissions.

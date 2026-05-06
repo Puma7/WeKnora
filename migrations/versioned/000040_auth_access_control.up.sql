@@ -32,25 +32,17 @@ WHERE u.id IN (
 )
 AND u.role = 'member';
 
--- 2. Track KB ownership at the user level (not just tenant level)
+-- 2. Track KB ownership at the user level (not just tenant level).
+-- We deliberately do NOT backfill owner_id for legacy KBs: leaving it NULL keeps
+-- tenant-wide visibility working for those rows under the resolution rule
+-- "KB has zero user grants -> any tenant member can view it". New KBs created
+-- after this migration get owner_id stamped by the KB service.
 ALTER TABLE knowledge_bases
     ADD COLUMN IF NOT EXISTS owner_id VARCHAR(36);
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_bases_owner_id ON knowledge_bases(owner_id);
 
-COMMENT ON COLUMN knowledge_bases.owner_id IS 'User ID of the KB creator/owner; null for legacy KBs created before this column existed';
-
--- Backfill owner_id for existing KBs by mapping each KB to the earliest user in its tenant.
-UPDATE knowledge_bases kb
-SET owner_id = u.id
-FROM (
-    SELECT DISTINCT ON (tenant_id) id, tenant_id
-    FROM users
-    WHERE tenant_id IS NOT NULL
-    ORDER BY tenant_id, created_at ASC, id ASC
-) u
-WHERE kb.tenant_id = u.tenant_id
-  AND kb.owner_id IS NULL;
+COMMENT ON COLUMN knowledge_bases.owner_id IS 'User ID of the KB creator/owner; null for legacy KBs that predate per-user ownership';
 
 -- 3. Invitation table: admins create rows here, the public accept endpoint redeems the token.
 CREATE TABLE IF NOT EXISTS user_invitations (

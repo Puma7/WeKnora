@@ -10,6 +10,9 @@ import (
 type UserService interface {
 	// Register creates a new user account
 	Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
+	// RegisterTrusted creates a user while bypassing the registration-mode gate.
+	// Reserved for trusted callers (AutoSetup on Lite first-boot, OIDC auto-provisioning).
+	RegisterTrusted(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
 	// Login authenticates a user and returns tokens
 	Login(ctx context.Context, req *types.LoginRequest) (*types.LoginResponse, error)
 	// GetOIDCAuthorizationURL builds the third-party OIDC authorization URL
@@ -44,6 +47,8 @@ type UserService interface {
 	GetCurrentUser(ctx context.Context) (*types.User, error)
 	// SearchUsers searches users by username or email
 	SearchUsers(ctx context.Context, query string, limit int) ([]*types.User, error)
+	// SearchUsersInTenant scopes the search to a single tenant.
+	SearchUsersInTenant(ctx context.Context, tenantID uint64, query string, limit int) ([]*types.User, error)
 	// RegistrationSettings returns the active registration mode + whitelist (env-derived).
 	RegistrationSettings(ctx context.Context) types.RegistrationSettings
 	// ListTenantUsers lists users belonging to the given tenant (admin scope).
@@ -78,8 +83,18 @@ type UserRepository interface {
 	ListUsersByTenant(ctx context.Context, tenantID uint64, offset, limit int) ([]*types.User, int64, error)
 	// SearchUsers searches users by username or email
 	SearchUsers(ctx context.Context, query string, limit int) ([]*types.User, error)
+	// SearchUsersInTenant searches users by username or email scoped to a single tenant.
+	SearchUsersInTenant(ctx context.Context, tenantID uint64, query string, limit int) ([]*types.User, error)
 	// GetUsersByIDs loads a batch of users by ID (for joining display data).
 	GetUsersByIDs(ctx context.Context, ids []string) ([]*types.User, error)
+	// CountActiveOwners returns the number of active users with role='owner' in a tenant.
+	// Used to prevent demoting the last owner under race conditions.
+	CountActiveOwners(ctx context.Context, tenantID uint64) (int64, error)
+	// DemoteOwnerIfSafe atomically changes the user's role to newRole only when
+	// at least one OTHER active owner remains in the tenant. Returns (true, nil)
+	// when the demotion succeeded, (false, nil) when the user is the sole owner
+	// (no rows updated), or (_, err) on a database error.
+	DemoteOwnerIfSafe(ctx context.Context, userID string, tenantID uint64, newRole string) (bool, error)
 }
 
 // AuthTokenRepository defines the auth token repository interface

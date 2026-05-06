@@ -23,6 +23,50 @@ func NewAdminUserHandler(userService interfaces.UserService) *AdminUserHandler {
 	return &AdminUserHandler{userService: userService}
 }
 
+// SearchUsers godoc
+// @Summary  Search users in the current tenant
+// @Description Returns up to `limit` users matching the query (username or email contains).
+//
+//	Used by the KB-permissions picker so frontends don't have to load the full
+//	user list. Tenant-scoped and capped to 50 results.
+//
+// @Tags     admin/users
+// @Produce  json
+// @Param    q     query  string  true   "Search query (matches username or email)"
+// @Param    limit query  int     false  "Max results (default 20, max 50)"
+// @Success  200  {object}  map[string]interface{}
+// @Router   /admin/users/search [get]
+func (h *AdminUserHandler) SearchUsers(c *gin.Context) {
+	ctx := c.Request.Context()
+	actor, err := h.userService.GetCurrentUser(ctx)
+	if err != nil {
+		c.Error(errors.NewUnauthorizedError("authentication required"))
+		return
+	}
+	q := strings.TrimSpace(c.Query("q"))
+	if q == "" {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": []*types.UserInfo{}})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	users, err := h.userService.SearchUsersInTenant(ctx, actor.TenantID, q, limit)
+	if err != nil {
+		c.Error(errors.NewInternalServerError("failed to search users").WithDetails(err.Error()))
+		return
+	}
+	infos := make([]*types.UserInfo, 0, len(users))
+	for _, u := range users {
+		infos = append(infos, u.ToUserInfo())
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": infos})
+}
+
 // ListUsers godoc
 // @Summary  List all users in the current tenant
 // @Tags     admin/users

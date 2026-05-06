@@ -11,6 +11,7 @@
     </div>
     <template v-else>
       <p class="hint">{{ $t('kbPermissions.hint') }}</p>
+      <p class="org-share-note">{{ $t('kbPermissions.orgShareNote') }}</p>
 
       <div class="add-row">
         <input
@@ -77,9 +78,9 @@ import { useI18n } from 'vue-i18n'
 import {
   type KBUserPermissionResponse,
   grantKBUserPermission,
-  listAdminUsers,
   listKBUserPermissions,
   revokeKBUserPermission,
+  searchAdminUsers,
   updateKBUserPermission,
 } from '@/api/admin'
 
@@ -115,15 +116,10 @@ async function loadGrants() {
 }
 
 async function onSearch() {
-  const q = searchQuery.value.trim().toLowerCase()
+  const q = searchQuery.value.trim()
   if (!q) return
   try {
-    // Tenant size is small; load + filter client-side rather than building a server-side
-    // search endpoint just for this picker.
-    const resp = await listAdminUsers(1, 200)
-    const matches = (resp?.users || []).filter(u =>
-      u.username.toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
-    )
+    const matches = await searchAdminUsers(q, 20)
     searchResults.value = matches.map(u => ({ id: u.id, username: u.username, email: u.email }))
   } catch (err: any) {
     MessagePlugin.error(err?.message || t('kbPermissions.searchFailed'))
@@ -166,7 +162,8 @@ watch(() => props.visible, v => { if (v) loadGrants() })
 </script>
 
 <style lang="less" scoped>
-.hint { color: var(--td-text-color-secondary); font-size: 13px; margin: 0 0 12px; }
+.hint { color: var(--td-text-color-secondary); font-size: 13px; margin: 0 0 4px; }
+.org-share-note { color: var(--td-text-color-placeholder); font-size: 12px; margin: 0 0 12px; font-style: italic; }
 .add-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .text-input, .select-input { height: 32px; padding: 0 8px; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: var(--td-bg-color-container); color: var(--td-text-color-primary); }
 .text-input { flex: 1; }

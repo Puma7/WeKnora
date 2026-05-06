@@ -1263,6 +1263,7 @@ export default {
     menuItem: 'User permissions',
     title: 'Knowledge base user permissions',
     hint: 'Grant tenant users individual access to this knowledge base.',
+    orgShareNote: 'Note: organization-level shares are managed separately and not shown here.',
     searchPlaceholder: 'Search by username or email',
     searchAction: 'Search',
     searchResults: 'Results',

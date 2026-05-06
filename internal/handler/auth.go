@@ -547,7 +547,10 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 		randomPassword := base64.RawURLEncoding.EncodeToString(randomBytes)
 		randomUsername := fmt.Sprintf("user_%s", base64.RawURLEncoding.EncodeToString(randomBytes[:6]))
 
-		_, err := h.userService.Register(ctx, &types.RegisterRequest{
+		// AutoSetup runs on Lite first-boot and must succeed even when
+		// REGISTRATION_MODE is invite_only/disabled — the operator hasn't had
+		// a chance to provision a tenant yet, so we bypass the gate explicitly.
+		_, err := h.userService.RegisterTrusted(ctx, &types.RegisterRequest{
 			Username: randomUsername,
 			Email:    defaultEmail,
 			Password: randomPassword,

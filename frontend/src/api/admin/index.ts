@@ -122,6 +122,18 @@ export async function listAdminUsers(page = 1, pageSize = 50): Promise<ListUsers
   return resp?.data as ListUsersResponse
 }
 
+/**
+ * Server-side user search scoped to the current tenant. Use this for pickers
+ * (KB grants, invitation autofill) instead of pulling the full user list and
+ * filtering client-side.
+ */
+export async function searchAdminUsers(query: string, limit = 20): Promise<AdminUserInfo[]> {
+  const q = query.trim()
+  if (!q) return []
+  const resp = await get(`/api/v1/admin/users/search?q=${encodeURIComponent(q)}&limit=${limit}`) as any
+  return (resp?.data ?? []) as AdminUserInfo[]
+}
+
 export async function updateUserRole(userId: string, role: UserRole): Promise<AdminUserInfo> {
   const resp = await put(`/api/v1/admin/users/${userId}/role`, { role }) as any
   return resp?.data as AdminUserInfo

@@ -96,10 +96,19 @@ func (s *userService) RegistrationSettings(_ context.Context) types.Registration
 }
 
 // HashInvitationToken converts a raw token to its storage-safe hash.
-// Defined as a package-level var so it can be reused by the invitation service.
-var HashInvitationToken = func(rawToken string) string {
+// Used by both the user service (token validation in Register) and the invitation
+// service (storing tokens at create-time).
+func HashInvitationToken(rawToken string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(rawToken)))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// registrationOptions tunes Register behavior for trusted internal callers.
+type registrationOptions struct {
+	// SkipModeGate bypasses the REGISTRATION_MODE / DISABLE_REGISTRATION gate.
+	// Used by AutoSetup (Lite first-run) and OIDC auto-provisioning, where the
+	// deployment has already authorized the flow at the operator level.
+	SkipModeGate bool
 }
 
 // Register creates a new user account.
@@ -114,6 +123,16 @@ var HashInvitationToken = func(rawToken string) string {
 // inviter's tenant (instead of getting a fresh workspace), the invitation is marked
 // accepted, and any pre-grants (role, permissions, KB grants) are applied.
 func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {
+	return s.registerInternal(ctx, req, registrationOptions{})
+}
+
+// RegisterTrusted creates an account while bypassing the registration-mode gate.
+// Reserved for AutoSetup and OIDC auto-provisioning.
+func (s *userService) RegisterTrusted(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {
+	return s.registerInternal(ctx, req, registrationOptions{SkipModeGate: true})
+}
+
+func (s *userService) registerInternal(ctx context.Context, req *types.RegisterRequest, opts registrationOptions) (*types.User, error) {
 	logger.Info(ctx, "Start user registration")
 
 	if req.Username == "" || req.Email == "" || req.Password == "" {
@@ -121,7 +140,7 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	}
 
 	settings := s.RegistrationSettings(ctx)
-	if settings.Mode == types.RegistrationModeDisabled {
+	if !opts.SkipModeGate && settings.Mode == types.RegistrationModeDisabled {
 		return nil, errors.New("registration is disabled")
 	}
 
@@ -140,8 +159,8 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 		invitation = inv
 	}
 
-	// Mode-specific gating. Invitation always satisfies the gate.
-	if invitation == nil {
+	// Mode-specific gating. Invitation OR a trusted internal call satisfies the gate.
+	if invitation == nil && !opts.SkipModeGate {
 		switch settings.Mode {
 		case types.RegistrationModeInviteOnly:
 			return nil, errors.New("registration requires an invitation")
@@ -152,7 +171,9 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 		}
 	}
 
-	if existing, _ := s.userRepo.GetUserByEmail(ctx, req.Email); existing != nil {
+	// Email lookups are case-insensitive. We store the canonical lowercase form
+	// so unique constraints behave consistently across all backends.
+	if existing, _ := s.userRepo.GetUserByEmail(ctx, emailLower); existing != nil {
 		return nil, errors.New("user with this email already exists")
 	}
 	if existing, _ := s.userRepo.GetUserByUsername(ctx, req.Username); existing != nil {
@@ -169,7 +190,7 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	user := &types.User{
 		ID:           uuid.New().String(),
 		Username:     req.Username,
-		Email:        req.Email,
+		Email:        emailLower,
 		PasswordHash: string(hashedPassword),
 		IsActive:     true,
 		Role:         types.UserRoleMember,
@@ -286,8 +307,8 @@ func (s *userService) lookupInvitationByToken(ctx context.Context, rawToken stri
 // Login authenticates a user and returns tokens
 func (s *userService) Login(ctx context.Context, req *types.LoginRequest) (*types.LoginResponse, error) {
 	logger.Info(ctx, "Start user login")
-	// Get user by email
-	user, err := s.userRepo.GetUserByEmail(ctx, req.Email)
+	// Lookups are case-insensitive: we always store and query the canonical lowercase form.
+	user, err := s.userRepo.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(req.Email)))
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get user by email: %v", err)
 		return &types.LoginResponse{
@@ -462,9 +483,9 @@ func (s *userService) GetUserByID(ctx context.Context, id string) (*types.User, 
 	return s.userRepo.GetUserByID(ctx, id)
 }
 
-// GetUserByEmail gets a user by email
+// GetUserByEmail gets a user by email (case-insensitive: emails are stored lowercase).
 func (s *userService) GetUserByEmail(ctx context.Context, email string) (*types.User, error) {
-	return s.userRepo.GetUserByEmail(ctx, email)
+	return s.userRepo.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
 }
 
 // GetUserByUsername gets a user by username
@@ -699,6 +720,14 @@ func (s *userService) SearchUsers(ctx context.Context, query string, limit int) 
 	return s.userRepo.SearchUsers(ctx, query, limit)
 }
 
+// SearchUsersInTenant scopes the search to a single tenant.
+func (s *userService) SearchUsersInTenant(ctx context.Context, tenantID uint64, query string, limit int) ([]*types.User, error) {
+	if query == "" {
+		return []*types.User{}, nil
+	}
+	return s.userRepo.SearchUsersInTenant(ctx, tenantID, query, limit)
+}
+
 // ListTenantUsers returns the users of a tenant with pagination metadata.
 func (s *userService) ListTenantUsers(ctx context.Context, tenantID uint64, offset, limit int) ([]*types.User, int64, error) {
 	if limit <= 0 {
@@ -745,21 +774,25 @@ func (s *userService) UpdateUserRole(ctx context.Context, actor *types.User, tar
 		return nil, errors.New("cannot assign a role higher than your own")
 	}
 
-	// Prevent leaving the tenant ownerless.
+	// Prevent leaving the tenant ownerless via an atomic compare-and-set:
+	// only demote when there is still at least one OTHER active owner. This
+	// closes the TOCTOU race where two admins simultaneously demote the last
+	// two owners — the second update finds 0 other owners and refuses.
 	if target.Role == types.UserRoleOwner && role != types.UserRoleOwner {
-		owners, _, err := s.userRepo.ListUsersByTenant(ctx, target.TenantID, 0, 200)
+		safe, err := s.userRepo.DemoteOwnerIfSafe(ctx, target.ID, target.TenantID, string(role))
 		if err != nil {
 			return nil, err
 		}
-		ownerCount := 0
-		for _, u := range owners {
-			if u.Role == types.UserRoleOwner && u.IsActive {
-				ownerCount++
-			}
-		}
-		if ownerCount <= 1 {
+		if !safe {
 			return nil, errors.New("cannot demote the only owner of the tenant")
 		}
+		// Reload to reflect the persisted change (role + updated_at).
+		if reloaded, rerr := s.userRepo.GetUserByID(ctx, target.ID); rerr == nil && reloaded != nil {
+			return reloaded, nil
+		}
+		target.Role = role
+		target.UpdatedAt = time.Now()
+		return target, nil
 	}
 
 	target.Role = role
@@ -1023,7 +1056,10 @@ func (s *userService) provisionOIDCUser(ctx context.Context, info *types.OIDCUse
 		return nil, fmt.Errorf("failed to generate password for OIDC user: %w", err)
 	}
 
-	user, err := s.Register(ctx, &types.RegisterRequest{
+	// OIDC auto-provisioning bypasses the registration-mode gate: enabling OIDC
+	// on a deployment is itself an explicit operator decision to trust the IdP,
+	// so a successful federated login should always create the local account.
+	user, err := s.RegisterTrusted(ctx, &types.RegisterRequest{
 		Username: username,
 		Email:    info.Email,
 		Password: randomPassword,

@@ -271,6 +271,9 @@ func RequireRole(minRole types.UserRole) gin.HandlerFunc {
 // RequireFeature returns a middleware that aborts with 403 unless the
 // authenticated user holds the specified feature flag (chat, search, create_kb,
 // invite_users, manage_users, manage_kbs).
+//
+// Synthetic API-key users (id "system-*") bypass the check because they
+// represent the tenant itself, not a constrained human user.
 func RequireFeature(feature string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := userFromContext(c)
@@ -279,11 +282,41 @@ func RequireFeature(feature string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		if strings.HasPrefix(user.ID, "system-") {
+			c.Next()
+			return
+		}
 		if !user.Can(feature) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: missing feature permission"})
 			c.Abort()
 			return
 		}
 		c.Next()
+	}
+}
+
+// RequireAnyFeature is the OR-form of RequireFeature: passes when the user
+// holds any of the supplied flags. Useful when a single endpoint serves both
+// "manager" and "inviter" personas.
+func RequireAnyFeature(features ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := userFromContext(c)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: authentication required"})
+			c.Abort()
+			return
+		}
+		if strings.HasPrefix(user.ID, "system-") {
+			c.Next()
+			return
+		}
+		for _, f := range features {
+			if user.Can(f) {
+				c.Next()
+				return
+			}
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: missing feature permission"})
+		c.Abort()
 	}
 }

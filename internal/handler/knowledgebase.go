@@ -25,11 +25,12 @@ import (
 
 // KnowledgeBaseHandler defines the HTTP handler for knowledge base operations
 type KnowledgeBaseHandler struct {
-	service           interfaces.KnowledgeBaseService
-	knowledgeService  interfaces.KnowledgeService
-	kbShareService    interfaces.KBShareService
-	agentShareService interfaces.AgentShareService
-	asynqClient       interfaces.TaskEnqueuer
+	service             interfaces.KnowledgeBaseService
+	knowledgeService    interfaces.KnowledgeService
+	kbShareService      interfaces.KBShareService
+	agentShareService   interfaces.AgentShareService
+	kbPermissionService interfaces.KBPermissionService
+	asynqClient         interfaces.TaskEnqueuer
 }
 
 // NewKnowledgeBaseHandler creates a new knowledge base handler instance
@@ -38,15 +39,56 @@ func NewKnowledgeBaseHandler(
 	knowledgeService interfaces.KnowledgeService,
 	kbShareService interfaces.KBShareService,
 	agentShareService interfaces.AgentShareService,
+	kbPermissionService interfaces.KBPermissionService,
 	asynqClient interfaces.TaskEnqueuer,
 ) *KnowledgeBaseHandler {
 	return &KnowledgeBaseHandler{
-		service:           service,
-		knowledgeService:  knowledgeService,
-		kbShareService:    kbShareService,
-		agentShareService: agentShareService,
-		asynqClient:       asynqClient,
+		service:             service,
+		knowledgeService:    knowledgeService,
+		kbShareService:      kbShareService,
+		agentShareService:   agentShareService,
+		kbPermissionService: kbPermissionService,
+		asynqClient:         asynqClient,
 	}
+}
+
+// enforceUserKBAccess applies per-user KB grants on TOP of the existing
+// tenant/org/agent gate. Returns nil when the user has at least requiredLevel.
+//
+// This only applies to same-tenant access; cross-tenant flows (org shares,
+// agent shares) carry their own permission semantics and are left untouched.
+// API-key users (synthetic system-* IDs without a real role) are also bypassed
+// because they represent the tenant itself, not a constrained human user.
+func (h *KnowledgeBaseHandler) enforceUserKBAccess(
+	c *gin.Context, kb *types.KnowledgeBase, requiredLevel types.KBPermission,
+) error {
+	if h.kbPermissionService == nil || kb == nil {
+		return nil
+	}
+	userVal, ok := c.Get(types.UserContextKey.String())
+	if !ok {
+		return nil
+	}
+	user, ok := userVal.(*types.User)
+	if !ok || user == nil {
+		return nil
+	}
+	// Cross-tenant access is handled by validateAndGetKnowledgeBase via org/agent shares.
+	if kb.TenantID != user.TenantID {
+		return nil
+	}
+	// Synthetic API-key user (id "system-<tenant>") has no role; skip enforcement.
+	if user.Role == "" || strings.HasPrefix(user.ID, "system-") {
+		return nil
+	}
+	perm, ok, err := h.kbPermissionService.ResolvePermission(c.Request.Context(), user, kb.ID)
+	if err != nil {
+		return apperrors.NewInternalServerError(err.Error())
+	}
+	if !ok || !perm.HasAtLeast(requiredLevel) {
+		return apperrors.NewForbiddenError("No permission to access this knowledge base")
+	}
+	return nil
 }
 
 // HybridSearch godoc
@@ -68,8 +110,12 @@ func (h *KnowledgeBaseHandler) HybridSearch(c *gin.Context) {
 	logger.Info(ctx, "Start hybrid search")
 
 	// Validate and check permission for knowledge base access
-	_, id, effectiveTenantID, _, err := h.validateAndGetKnowledgeBase(c)
+	kb, id, effectiveTenantID, _, err := h.validateAndGetKnowledgeBase(c)
 	if err != nil {
+		c.Error(err)
+		return
+	}
+	if err := h.enforceUserKBAccess(c, kb, types.KBPermissionViewer); err != nil {
 		c.Error(err)
 		return
 	}
@@ -272,6 +318,10 @@ func (h *KnowledgeBaseHandler) GetKnowledgeBase(c *gin.Context) {
 		c.Error(err)
 		return
 	}
+	if err := h.enforceUserKBAccess(c, kb, types.KBPermissionViewer); err != nil {
+		c.Error(err)
+		return
+	}
 	// Fill counts (knowledge_count, chunk_count, is_processing) so hover/detail shows correct numbers
 	if fillErr := h.service.FillKnowledgeBaseCounts(c.Request.Context(), kb); fillErr != nil {
 		logger.Warnf(c.Request.Context(), "Failed to fill KB counts for %s: %v", kb.ID, fillErr)
@@ -393,6 +443,23 @@ func (h *KnowledgeBaseHandler) ListKnowledgeBases(c *gin.Context) {
 		return
 	}
 
+	// Apply per-user grants on top of tenant-wide visibility. Tenant admins/owners
+	// see everything; non-admins only see KBs that have no explicit grants OR
+	// have a grant for them. Synthetic API-key users (no role) are exempt.
+	if h.kbPermissionService != nil {
+		if userVal, ok := c.Get(types.UserContextKey.String()); ok {
+			if user, ok := userVal.(*types.User); ok && user != nil &&
+				user.Role != "" && !strings.HasPrefix(user.ID, "system-") {
+				filtered, ferr := h.kbPermissionService.FilterAccessibleSameTenant(ctx, user, kbs)
+				if ferr != nil {
+					logger.Warnf(ctx, "Failed to filter KBs by user permissions: %v", ferr)
+				} else {
+					kbs = filtered
+				}
+			}
+		}
+	}
+
 	// Get share counts for all knowledge bases
 	if len(kbs) > 0 && h.kbShareService != nil {
 		kbIDs := make([]string, len(kbs))
@@ -438,6 +505,15 @@ func (h *KnowledgeBaseHandler) TogglePinKnowledgeBase(c *gin.Context) {
 		return
 	}
 
+	// Pin is a per-user UI preference, but we still gate by view permission so
+	// users can't pin a KB they aren't allowed to see.
+	if existing, gerr := h.service.GetKnowledgeBaseByID(ctx, id); gerr == nil && existing != nil {
+		if perr := h.enforceUserKBAccess(c, existing, types.KBPermissionViewer); perr != nil {
+			c.Error(perr)
+			return
+		}
+	}
+
 	kb, err := h.service.TogglePinKnowledgeBase(ctx, id)
 	if err != nil {
 		if stderrors.Is(err, repository.ErrKnowledgeBaseNotFound) {
@@ -480,7 +556,7 @@ func (h *KnowledgeBaseHandler) UpdateKnowledgeBase(c *gin.Context) {
 	logger.Info(ctx, "Start updating knowledge base")
 
 	// Validate and get the knowledge base
-	_, id, _, permission, err := h.validateAndGetKnowledgeBase(c)
+	kb, id, _, permission, err := h.validateAndGetKnowledgeBase(c)
 	if err != nil {
 		c.Error(err)
 		return
@@ -489,6 +565,11 @@ func (h *KnowledgeBaseHandler) UpdateKnowledgeBase(c *gin.Context) {
 	// Only admin/editor can update knowledge base
 	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
 		c.Error(apperrors.NewForbiddenError("No permission to update knowledge base"))
+		return
+	}
+	// Same-tenant grants must also be at least editor.
+	if err := h.enforceUserKBAccess(c, kb, types.KBPermissionEditor); err != nil {
+		c.Error(err)
 		return
 	}
 
@@ -504,7 +585,7 @@ func (h *KnowledgeBaseHandler) UpdateKnowledgeBase(c *gin.Context) {
 		secutils.SanitizeForLog(id), secutils.SanitizeForLog(req.Name))
 
 	// Update the knowledge base
-	kb, err := h.service.UpdateKnowledgeBase(ctx, id, req.Name, req.Description, req.Config)
+	kb, err = h.service.UpdateKnowledgeBase(ctx, id, req.Name, req.Description, req.Config)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(apperrors.NewInternalServerError(err.Error()))
@@ -546,6 +627,11 @@ func (h *KnowledgeBaseHandler) DeleteKnowledgeBase(c *gin.Context) {
 	tenantID, _ := c.Get(types.TenantIDContextKey.String())
 	if kb.TenantID != tenantID.(uint64) || permission != types.OrgRoleAdmin {
 		c.Error(apperrors.NewForbiddenError("Only knowledge base owner can delete"))
+		return
+	}
+	// Same-tenant grants must also be admin to delete.
+	if err := h.enforceUserKBAccess(c, kb, types.KBPermissionAdmin); err != nil {
+		c.Error(err)
 		return
 	}
 

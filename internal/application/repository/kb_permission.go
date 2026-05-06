@@ -74,6 +74,44 @@ func (r *kbPermissionRepository) ListByUser(ctx context.Context, userID string) 
 	return perms, nil
 }
 
+// ListGrantsForUserInKBs returns the user's grants restricted to the supplied KB ID set.
+func (r *kbPermissionRepository) ListGrantsForUserInKBs(ctx context.Context, userID string, kbIDs []string) ([]*types.KBUserPermission, error) {
+	if len(kbIDs) == 0 || userID == "" {
+		return []*types.KBUserPermission{}, nil
+	}
+	var perms []*types.KBUserPermission
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND knowledge_base_id IN ?", userID, kbIDs).
+		Find(&perms).Error; err != nil {
+		return nil, err
+	}
+	return perms, nil
+}
+
+// KBsWithAnyGrants returns a map[kbID]true for every input KB ID that has at least
+// one active grant. KBs absent from the map have zero grants.
+func (r *kbPermissionRepository) KBsWithAnyGrants(ctx context.Context, kbIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(kbIDs))
+	if len(kbIDs) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		KnowledgeBaseID string
+	}
+	err := r.db.WithContext(ctx).
+		Model(&types.KBUserPermission{}).
+		Select("DISTINCT knowledge_base_id").
+		Where("knowledge_base_id IN ?", kbIDs).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.KnowledgeBaseID] = true
+	}
+	return out, nil
+}
+
 func (r *kbPermissionRepository) Update(ctx context.Context, p *types.KBUserPermission) error {
 	return r.db.WithContext(ctx).Save(p).Error
 }

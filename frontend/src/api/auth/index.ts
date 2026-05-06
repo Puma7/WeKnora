@@ -87,6 +87,20 @@ export interface UserInfo {
   avatar?: string
   tenant_id: string
   can_access_all_tenants?: boolean
+  /** Global role inside the tenant (owner/admin/member/viewer); may be missing on legacy responses. */
+  role?: string
+  /**
+   * Effective feature permissions returned by the backend (with role defaults applied).
+   * Boolean flags only — overrides are not separable here.
+   */
+  permissions?: {
+    can_chat?: boolean
+    can_search?: boolean
+    can_create_kb?: boolean
+    can_invite_users?: boolean
+    can_manage_users?: boolean
+    can_manage_kbs?: boolean
+  }
   created_at: string
   updated_at: string
 }

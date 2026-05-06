@@ -457,8 +457,10 @@ func RegisterInvitationPublicRoutes(r *gin.RouterGroup, h *handler.InvitationHan
 }
 
 // RegisterAdminInvitationRoutes registers admin-only invitation management.
+// Gated at the route level so a future endpoint added to this group can't
+// accidentally be reachable by users without invite/manage privileges.
 func RegisterAdminInvitationRoutes(r *gin.RouterGroup, h *handler.InvitationHandler) {
-	g := r.Group("/admin/invitations")
+	g := r.Group("/admin/invitations", middleware.RequireAnyFeature("invite_users", "manage_users"))
 	{
 		g.POST("", h.CreateInvitation)
 		g.GET("", h.ListInvitations)
@@ -467,10 +469,13 @@ func RegisterAdminInvitationRoutes(r *gin.RouterGroup, h *handler.InvitationHand
 }
 
 // RegisterAdminUserRoutes registers admin-only user management routes.
+// The group accepts both managers and inviters (the latter need read access
+// for the user picker); individual mutate handlers enforce manage_users.
 func RegisterAdminUserRoutes(r *gin.RouterGroup, h *handler.AdminUserHandler) {
-	g := r.Group("/admin/users")
+	g := r.Group("/admin/users", middleware.RequireAnyFeature("invite_users", "manage_users"))
 	{
 		g.GET("", h.ListUsers)
+		g.GET("/search", h.SearchUsers)
 		g.PUT("/:id/role", h.UpdateUserRole)
 		g.PUT("/:id/permissions", h.UpdateUserPermissions)
 		g.PUT("/:id/active", h.SetUserActive)

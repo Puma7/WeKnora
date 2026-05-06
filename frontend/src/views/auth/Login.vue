@@ -568,6 +568,8 @@ const persistLoginResponse = async (response: any) => {
       avatar: response.user.avatar,
       tenant_id: String(response.tenant.id) || '',
       can_access_all_tenants: response.user.can_access_all_tenants || false,
+      role: (response.user as any).role,
+      permissions: (response.user as any).permissions,
       created_at: response.user.created_at || new Date().toISOString(),
       updated_at: response.user.updated_at || new Date().toISOString()
     })
