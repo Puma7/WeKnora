@@ -298,6 +298,9 @@ func RegisterKnowledgeBaseRoutes(r *gin.RouterGroup, handler *handler.KnowledgeB
 		kb.GET("/copy/progress/:task_id", handler.GetKBCloneProgress)
 		// 获取可移动目标知识库列表
 		kb.GET("/:id/move-targets", handler.ListMoveTargets)
+		// Recover stuck/failed knowledge — requeue archived asynq tasks
+		// for this KB and optionally reparse failed knowledge.
+		kb.POST("/:id/recover", handler.RecoverKnowledgeBase)
 	}
 }
 
