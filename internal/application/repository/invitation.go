@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -85,4 +86,27 @@ func (r *invitationRepository) ListPendingByEmail(ctx context.Context, email str
 // Update persists changes to an invitation row.
 func (r *invitationRepository) Update(ctx context.Context, inv *types.UserInvitation) error {
 	return r.db.WithContext(ctx).Save(inv).Error
+}
+
+// NEU: ConsumeIfPending runs a single conditional UPDATE that flips the
+// invitation from pending to accepted only when it's still pending AND
+// unexpired AND not soft-deleted. The whole check happens at row-write time
+// inside the same statement, so a parallel revoke that lost the race cannot
+// be silently overwritten by a non-conditional Save afterwards.
+func (r *invitationRepository) ConsumeIfPending(ctx context.Context, invitationID, acceptedUserID string) (bool, error) {
+	now := time.Now()
+	res := r.db.WithContext(ctx).
+		Model(&types.UserInvitation{}).
+		Where("id = ? AND status = ? AND expires_at > ?",
+			invitationID, types.InvitationStatusPending, now).
+		Updates(map[string]interface{}{
+			"status":           types.InvitationStatusAccepted,
+			"accepted_user_id": acceptedUserID,
+			"accepted_at":      now,
+			"updated_at":       now,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }

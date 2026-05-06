@@ -186,11 +186,26 @@ func (s *userService) registerInternal(ctx context.Context, req *types.RegisterR
 
 	// Email lookups are case-insensitive. We store the canonical lowercase form
 	// so unique constraints behave consistently across all backends.
+	// GEÄNDERT: in non-open registration modes, return a generic error so an
+	// unauthenticated attacker can't probe whether a specific email or username
+	// already has an account. In open mode the existence of an account is not
+	// sensitive (anyone can sign up anyway) so we keep the precise hint.
+	emailTaken := false
+	usernameTaken := false
 	if existing, _ := s.userRepo.GetUserByEmail(ctx, emailLower); existing != nil {
-		return nil, errors.New("user with this email already exists")
+		emailTaken = true
 	}
 	if existing, _ := s.userRepo.GetUserByUsername(ctx, req.Username); existing != nil {
-		return nil, errors.New("user with this username already exists")
+		usernameTaken = true
+	}
+	if emailTaken || usernameTaken {
+		if settings.Mode == types.RegistrationModeOpen {
+			if emailTaken {
+				return nil, errors.New("user with this email already exists")
+			}
+			return nil, errors.New("user with this username already exists")
+		}
+		return nil, errors.New("registration failed; the email or username may already be in use")
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -237,21 +252,33 @@ func (s *userService) registerInternal(ctx context.Context, req *types.RegisterR
 		user.Role = types.UserRoleOwner
 	}
 
+	// GEÄNDERT: when an invitation is in play, atomically consume it BEFORE the
+	// user-create. The conditional UPDATE in ConsumeIfPending only succeeds
+	// when the invitation is still pending+unexpired, closing the race where
+	// an admin revokes between our initial lookup and the final status update.
+	// If a parallel revoke wins, ConsumeIfPending returns false and we abort
+	// without ever inserting the user row.
+	if invitation != nil {
+		consumed, cerr := s.invitationRepo.ConsumeIfPending(ctx, invitation.ID, user.ID)
+		if cerr != nil {
+			logger.Errorf(ctx, "Failed to consume invitation: %v", cerr)
+			return nil, errors.New("failed to consume invitation")
+		}
+		if !consumed {
+			return nil, errors.New("invitation is no longer valid")
+		}
+	}
+
 	if err := s.userRepo.CreateUser(ctx, user); err != nil {
 		logger.Errorf(ctx, "Failed to create user: %v", err)
+		// If consume already happened, the invitation is now an orphan
+		// (status=accepted, no live user). That's recoverable: the same email
+		// can be re-invited. Worse alternative would be a dangling pending
+		// invitation that gets re-used by an attacker.
 		return nil, errors.New("failed to create user")
 	}
 
 	if invitation != nil {
-		acceptedAt := now
-		invitation.Status = types.InvitationStatusAccepted
-		invitation.AcceptedAt = &acceptedAt
-		invitation.AcceptedUserID = user.ID
-		invitation.UpdatedAt = now
-		if err := s.invitationRepo.Update(ctx, invitation); err != nil {
-			logger.Errorf(ctx, "Failed to mark invitation as accepted: %v", err)
-			// Best-effort: user is already created; return success but log loudly.
-		}
 		s.applyInvitationKBGrants(ctx, invitation, user)
 	}
 
@@ -648,7 +675,18 @@ func (s *userService) ValidateToken(ctx context.Context, tokenString string) (*t
 		return nil, errors.New("token is revoked")
 	}
 
-	return s.userRepo.GetUserByID(ctx, userID)
+	// GEÄNDERT: defense-in-depth. SetUserActive(false) revokes tokens, but a
+	// direct DB update or future code path that flips is_active without going
+	// through the service would leave existing JWTs valid for up to 24h. This
+	// check makes deactivation effective on the very next request.
+	user, err := s.userRepo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !user.IsActive {
+		return nil, errors.New("account is disabled")
+	}
+	return user, nil
 }
 
 // RefreshToken refreshes access token using refresh token
@@ -692,6 +730,11 @@ func (s *userService) RefreshToken(
 	user, err := s.userRepo.GetUserByID(ctx, userID)
 	if err != nil {
 		return "", "", err
+	}
+	// GEÄNDERT: refuse refresh for disabled accounts so a deactivated user
+	// can't extend their session past the existing access token's lifetime.
+	if !user.IsActive {
+		return "", "", errors.New("account is disabled")
 	}
 
 	// Revoke old refresh token

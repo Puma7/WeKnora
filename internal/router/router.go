@@ -80,14 +80,32 @@ func NewRouter(params RouterParams) *gin.Engine {
 	r.ContextWithFallback = true
 
 	// CORS 中间件应放在最前面
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"},
+	// GEÄNDERT: when CORS_ALLOWED_ORIGINS is set, restrict to those origins so
+	// production deployments can lock down cross-site access. Empty/unset
+	// preserves the legacy "*" behavior for backwards compatibility — no
+	// existing dev or self-hosted setup is affected by this change.
+	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Request-ID"},
 		ExposeHeaders:    []string{"Content-Length", "Access-Control-Allow-Origin"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
-	}))
+	}
+	if raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); raw != "" && raw != "*" {
+		allowed := make(map[string]struct{})
+		for _, o := range strings.Split(raw, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				allowed[o] = struct{}{}
+			}
+		}
+		corsConfig.AllowOriginFunc = func(origin string) bool {
+			_, ok := allowed[origin]
+			return ok
+		}
+	} else {
+		corsConfig.AllowOrigins = []string{"*"}
+	}
+	r.Use(cors.New(corsConfig))
 
 	// 基础中间件（不需要认证）
 	r.Use(middleware.RequestID())

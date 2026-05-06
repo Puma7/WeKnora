@@ -51,6 +51,13 @@ func sanitizeBody(body string) string {
 		{`"token"\s*:\s*"[^"]*"`, `"token":"***"`},
 		{`"access_token"\s*:\s*"[^"]*"`, `"access_token":"***"`},
 		{`"refresh_token"\s*:\s*"[^"]*"`, `"refresh_token":"***"`},
+		// NEU: invitation_token in /auth/register payloads. The existing
+		// "token" pattern doesn't match because the underscore prefix breaks
+		// the leading-quote anchor.
+		{`"invitation_token"\s*:\s*"[^"]*"`, `"invitation_token":"***"`},
+		// NEU: magic_link_path in CreateInvitation responses contains the raw
+		// token as the trailing URL segment (/invite/<token>); redact wholesale.
+		{`"magic_link_path"\s*:\s*"[^"]*"`, `"magic_link_path":"***"`},
 		{`"authorization"\s*:\s*"[^"]*"`, `"authorization":"***"`},
 		{`"api_key"\s*:\s*"[^"]*"`, `"api_key":"***"`},
 		{`"secret"\s*:\s*"[^"]*"`, `"secret":"***"`},
@@ -137,12 +144,35 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
+// NEU: redactInvitationToken replaces the trailing path segment of the
+// invitation-preview endpoint with a placeholder so the raw token never
+// reaches the access log. Keeps the route prefix intact for traffic analysis.
+const invitationPreviewPrefix = "/api/v1/auth/invitations/"
+
+func redactInvitationToken(path string) string {
+	if !strings.HasPrefix(path, invitationPreviewPrefix) {
+		return path
+	}
+	rest := path[len(invitationPreviewPrefix):]
+	if rest == "" || strings.Contains(rest, "/") {
+		// Not a single-segment token route (admin sub-paths etc.); leave it.
+		return path
+	}
+	return invitationPreviewPrefix + "[REDACTED]"
+}
+
 // Logger middleware logs request details with request ID, input and output
 func Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
 		raw := c.Request.URL.RawQuery
+
+		// NEU: invitation tokens travel as the trailing path segment of
+		// /api/v1/auth/invitations/<token>. Logging the raw path would expose
+		// pending tokens to anyone with read access to centralized log
+		// backends. Mask the segment before any logger field is built.
+		path = redactInvitationToken(path)
 
 		isWikiStats := strings.HasPrefix(path, "/api/v1/knowledgebase/") && strings.HasSuffix(path, "/wiki/stats")
 		if strings.HasPrefix(path, "/assets/") || isWikiStats {

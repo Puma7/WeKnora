@@ -30,4 +30,10 @@ type InvitationRepository interface {
 	ListByTenant(ctx context.Context, tenantID uint64) ([]*types.UserInvitation, error)
 	ListPendingByEmail(ctx context.Context, email string) ([]*types.UserInvitation, error)
 	Update(ctx context.Context, inv *types.UserInvitation) error
+	// NEU: ConsumeIfPending atomically transitions an invitation from pending
+	// to accepted IFF it's still pending and unexpired. Returns (true, nil)
+	// when the consume succeeded, (false, nil) if the invitation was already
+	// revoked/expired/accepted, or (_, err) on a database error. Callers must
+	// invoke this BEFORE creating the user to close the revoke-vs-accept race.
+	ConsumeIfPending(ctx context.Context, invitationID, acceptedUserID string) (bool, error)
 }
