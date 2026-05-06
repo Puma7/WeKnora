@@ -62,26 +62,36 @@ func NewKnowledgeBaseHandler(
 func (h *KnowledgeBaseHandler) enforceUserKBAccess(
 	c *gin.Context, kb *types.KnowledgeBase, requiredLevel types.KBPermission,
 ) error {
-	if h.kbPermissionService == nil || kb == nil {
-		return nil
+	// GEÄNDERT: fail-closed when the service is missing. A misconfigured DI
+	// container should be loud, not silently bypass per-user grants.
+	if h.kbPermissionService == nil {
+		return apperrors.NewInternalServerError("kb permission service unavailable")
+	}
+	if kb == nil {
+		return apperrors.NewBadRequestError("knowledge base required")
 	}
 	userVal, ok := c.Get(types.UserContextKey.String())
 	if !ok {
-		return nil
+		return apperrors.NewUnauthorizedError("authentication required")
 	}
 	user, ok := userVal.(*types.User)
 	if !ok || user == nil {
-		return nil
+		return apperrors.NewUnauthorizedError("authentication required")
 	}
 	// Cross-tenant access is handled by validateAndGetKnowledgeBase via org/agent shares.
 	if kb.TenantID != user.TenantID {
 		return nil
 	}
-	// Synthetic API-key user (id "system-<tenant>") has no role; skip enforcement.
-	if user.Role == "" || strings.HasPrefix(user.ID, "system-") {
+	// GEÄNDERT: defer to a single helper so synthetic detection lives in one place.
+	if isSyntheticAPIKeyUser(c, user) {
 		return nil
 	}
-	perm, ok, err := h.kbPermissionService.ResolvePermission(c.Request.Context(), user, kb.ID)
+	// GEÄNDERT: empty role on a real DB user means the row is misconfigured;
+	// fail closed instead of treating it like an API-key bypass.
+	if user.Role == "" {
+		return apperrors.NewForbiddenError("user has no role assigned")
+	}
+	perm, ok, err := h.kbPermissionService.ResolvePermissionWithKB(c.Request.Context(), user, kb)
 	if err != nil {
 		return apperrors.NewInternalServerError(err.Error())
 	}
@@ -89,6 +99,20 @@ func (h *KnowledgeBaseHandler) enforceUserKBAccess(
 		return apperrors.NewForbiddenError("No permission to access this knowledge base")
 	}
 	return nil
+}
+
+// NEU: isSyntheticAPIKeyUser distinguishes the middleware-constructed API-key
+// user from a real DB row. Defense-in-depth: requires both the "system-" id
+// prefix AND an empty PasswordHash AND the context flag set by the API-key
+// branch of the auth middleware. A DB-injected row can fake the id prefix but
+// not the context flag, which is set programmatically per-request.
+func isSyntheticAPIKeyUser(c *gin.Context, user *types.User) bool {
+	if v, ok := c.Get("isAPIKeyAuth"); ok {
+		if flag, ok := v.(bool); ok && flag {
+			return true
+		}
+	}
+	return strings.HasPrefix(user.ID, "system-") && user.PasswordHash == ""
 }
 
 // HybridSearch godoc

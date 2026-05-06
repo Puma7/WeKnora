@@ -214,6 +214,21 @@ func (s *kbPermissionService) ResolvePermission(
 	if kb == nil {
 		return "", false, errors.New("knowledge base not found")
 	}
+	return s.ResolvePermissionWithKB(ctx, user, kb)
+}
+
+// NEU: ResolvePermissionWithKB is the inner resolution that skips the KB lookup.
+// Callers that already loaded the KB (e.g. handlers that called validateAndGetKnowledgeBase)
+// should prefer this to avoid an extra GetKnowledgeBaseByID query per request.
+func (s *kbPermissionService) ResolvePermissionWithKB(
+	ctx context.Context, user *types.User, kb *types.KnowledgeBase,
+) (types.KBPermission, bool, error) {
+	if user == nil {
+		return "", false, errors.New("user required")
+	}
+	if kb == nil {
+		return "", false, errors.New("knowledge base required")
+	}
 
 	// Different tenant: no direct access (cross-tenant lives via org shares, handled elsewhere).
 	if kb.TenantID != user.TenantID {
@@ -230,7 +245,7 @@ func (s *kbPermissionService) ResolvePermission(
 	}
 
 	// Direct grant takes precedence over the legacy tenant-wide visibility.
-	grant, err := s.repo.GetByKBAndUser(ctx, kbID, user.ID)
+	grant, err := s.repo.GetByKBAndUser(ctx, kb.ID, user.ID)
 	if err == nil {
 		return grant.Permission, true, nil
 	}
@@ -239,11 +254,11 @@ func (s *kbPermissionService) ResolvePermission(
 	}
 
 	// No grant for this user. Check if the KB has any grants at all.
-	hasGrants, err := s.repo.KBsWithAnyGrants(ctx, []string{kbID})
+	hasGrants, err := s.repo.KBsWithAnyGrants(ctx, []string{kb.ID})
 	if err != nil {
 		return "", false, err
 	}
-	if hasGrants[kbID] {
+	if hasGrants[kb.ID] {
 		// KB has grants but not for this user -> restricted, no access.
 		return "", false, nil
 	}

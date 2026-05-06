@@ -10,9 +10,6 @@ import (
 type UserService interface {
 	// Register creates a new user account
 	Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
-	// RegisterTrusted creates a user while bypassing the registration-mode gate.
-	// Reserved for trusted callers (AutoSetup on Lite first-boot, OIDC auto-provisioning).
-	RegisterTrusted(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
 	// Login authenticates a user and returns tokens
 	Login(ctx context.Context, req *types.LoginRequest) (*types.LoginResponse, error)
 	// GetOIDCAuthorizationURL builds the third-party OIDC authorization URL
@@ -91,10 +88,27 @@ type UserRepository interface {
 	// Used to prevent demoting the last owner under race conditions.
 	CountActiveOwners(ctx context.Context, tenantID uint64) (int64, error)
 	// DemoteOwnerIfSafe atomically changes the user's role to newRole only when
-	// at least one OTHER active owner remains in the tenant. Returns (true, nil)
-	// when the demotion succeeded, (false, nil) when the user is the sole owner
-	// (no rows updated), or (_, err) on a database error.
-	DemoteOwnerIfSafe(ctx context.Context, userID string, tenantID uint64, newRole string) (bool, error)
+	// at least one OTHER active owner remains in the tenant.
+	// GEÄNDERT: returns three states — (true, "", nil) on success, (false, reason, nil)
+	// when the demotion was refused (reason is "not_owner_anymore" or "last_owner"),
+	// or (false, "", err) on a database error. The reason lets callers surface
+	// race conditions distinctly from the legitimate last-owner block.
+	DemoteOwnerIfSafe(ctx context.Context, userID string, tenantID uint64, newRole string) (bool, string, error)
+}
+
+// NEU: TrustedUserProvisioner is a deliberately narrow interface that exposes
+// only the gate-bypassing registration paths. Keeping it separate from
+// UserService means a generic handler that injects UserService cannot reach
+// the bypass methods at all — only handlers that explicitly opt into
+// TrustedUserProvisioner can call them, making the trust boundary visible
+// in DI wiring rather than buried in comments.
+type TrustedUserProvisioner interface {
+	// RegisterTrusted creates a user bypassing both the disabled/invite_only
+	// gate AND the email whitelist. Reserved for AutoSetup (Lite first-boot).
+	RegisterTrusted(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
+	// RegisterFromOIDC creates a user bypassing the disabled/invite_only gate
+	// but enforcing the email whitelist. Reserved for OIDC auto-provisioning.
+	RegisterFromOIDC(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
 }
 
 // AuthTokenRepository defines the auth token repository interface

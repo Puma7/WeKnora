@@ -172,7 +172,15 @@ export const useAuthStore = defineStore('auth', () => {
 
     if (storedUser) {
       try {
-        user.value = JSON.parse(storedUser)
+        const parsed = JSON.parse(storedUser)
+        // GEÄNDERT: invalidate cached users that predate the role/permissions
+        // schema. Dropping the user (but keeping the token) forces the router
+        // guard to refetch /auth/me and hydrate the new fields.
+        if (parsed && typeof parsed === 'object' && !('role' in parsed)) {
+          localStorage.removeItem('weknora_user')
+        } else {
+          user.value = parsed
+        }
       } catch (e) {
         console.error(i18n.global.t('authStore.errors.parseUserFailed'), e)
       }

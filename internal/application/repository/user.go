@@ -44,9 +44,11 @@ func (r *userRepository) GetUserByID(ctx context.Context, id string) (*types.Use
 }
 
 // GetUserByEmail gets a user by email
+// GEÄNDERT: case-insensitive lookup so legacy mixed-case rows still match after
+// the application-layer lowercase normalization started storing canonical form.
 func (r *userRepository) GetUserByEmail(ctx context.Context, email string) (*types.User, error) {
 	var user types.User
-	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("LOWER(email) = LOWER(?)", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
 		}
@@ -84,9 +86,20 @@ func (r *userRepository) UpdateUser(ctx context.Context, user *types.User) error
 	return r.db.WithContext(ctx).Save(user).Error
 }
 
-// DeleteUser deletes a user
+// DeleteUser deletes a user.
+// GEÄNDERT: also nulls knowledge_bases.owner_id for any KBs the user owned, so
+// the KB doesn't end up with a dangling reference to a deleted account. A KB
+// with owner_id NULL falls back to the legacy "tenant-wide visibility unless
+// any explicit grant exists" rule, which is the safe default.
 func (r *userRepository) DeleteUser(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&types.User{}).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			"UPDATE knowledge_bases SET owner_id = NULL WHERE owner_id = ?", id,
+		).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", id).Delete(&types.User{}).Error
+	})
 }
 
 // ListUsers lists users with pagination
@@ -198,26 +211,43 @@ func (r *userRepository) CountActiveOwners(ctx context.Context, tenantID uint64)
 	return count, err
 }
 
-// DemoteOwnerIfSafe runs a single-statement compare-and-set: it changes the
-// user's role to newRole only when at least one OTHER active owner remains.
-// The "other owner" check lives inside the WHERE clause so two concurrent
-// demotions cannot both succeed and leave the tenant ownerless.
-func (r *userRepository) DemoteOwnerIfSafe(ctx context.Context, userID string, tenantID uint64, newRole string) (bool, error) {
-	res := r.db.WithContext(ctx).
-		Model(&types.User{}).
-		Where(
-			"id = ? AND role = ? AND EXISTS (?)",
-			userID, types.UserRoleOwner,
-			r.db.Model(&types.User{}).
-				Select("1").
-				Where("tenant_id = ? AND id <> ? AND role = ? AND is_active = ?",
-					tenantID, userID, types.UserRoleOwner, true),
-		).
-		Updates(map[string]interface{}{"role": newRole, "updated_at": time.Now()})
-	if res.Error != nil {
-		return false, res.Error
+// DemoteOwnerIfSafe runs the role change inside a transaction with two explicit
+// checks so the caller can distinguish a race (target is no longer an owner)
+// from the legitimate "last active owner" refusal.
+// GEÄNDERT: previously this used a single conditional UPDATE that returned
+// RowsAffected=0 in both failure modes, leaving operators with an ambiguous
+// "cannot demote the only owner" error even when the real cause was a race.
+func (r *userRepository) DemoteOwnerIfSafe(ctx context.Context, userID string, tenantID uint64, newRole string) (bool, string, error) {
+	var reason string
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current types.User
+		if err := tx.Where("id = ?", userID).First(&current).Error; err != nil {
+			return err
+		}
+		// Race-detection: someone else already changed the role.
+		if current.Role != types.UserRoleOwner {
+			reason = "not_owner_anymore"
+			return nil
+		}
+		var otherOwners int64
+		if err := tx.Model(&types.User{}).
+			Where("tenant_id = ? AND id <> ? AND role = ? AND is_active = ?",
+				tenantID, userID, types.UserRoleOwner, true).
+			Count(&otherOwners).Error; err != nil {
+			return err
+		}
+		if otherOwners == 0 {
+			reason = "last_owner"
+			return nil
+		}
+		return tx.Model(&types.User{}).
+			Where("id = ? AND role = ?", userID, types.UserRoleOwner).
+			Updates(map[string]interface{}{"role": newRole, "updated_at": time.Now()}).Error
+	})
+	if err != nil {
+		return false, "", err
 	}
-	return res.RowsAffected > 0, nil
+	return reason == "", reason, nil
 }
 
 // authTokenRepository implements auth token repository interface

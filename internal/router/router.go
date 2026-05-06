@@ -469,13 +469,14 @@ func RegisterAdminInvitationRoutes(r *gin.RouterGroup, h *handler.InvitationHand
 }
 
 // RegisterAdminUserRoutes registers admin-only user management routes.
-// The group accepts both managers and inviters (the latter need read access
-// for the user picker); individual mutate handlers enforce manage_users.
+// GEÄNDERT: /admin/users/search lives outside the gated group so KB admins
+// (whose authority comes from a per-KB grant, not a tenant-wide feature)
+// can populate the user picker. Search results are tenant-scoped already.
 func RegisterAdminUserRoutes(r *gin.RouterGroup, h *handler.AdminUserHandler) {
+	r.GET("/admin/users/search", h.SearchUsers)
 	g := r.Group("/admin/users", middleware.RequireAnyFeature("invite_users", "manage_users"))
 	{
 		g.GET("", h.ListUsers)
-		g.GET("/search", h.SearchUsers)
 		g.PUT("/:id/role", h.UpdateUserRole)
 		g.PUT("/:id/permissions", h.UpdateUserPermissions)
 		g.PUT("/:id/active", h.SetUserActive)

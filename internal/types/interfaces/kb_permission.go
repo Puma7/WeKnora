@@ -20,6 +20,9 @@ type KBPermissionService interface {
 	// considering: ownership, direct grants, and tenant membership.
 	// Returns ("", false) when the user has no access at all.
 	ResolvePermission(ctx context.Context, user *types.User, kbID string) (types.KBPermission, bool, error)
+	// NEU: ResolvePermissionWithKB skips the KB lookup when the caller already
+	// has the row loaded — avoids an extra DB roundtrip on hot paths.
+	ResolvePermissionWithKB(ctx context.Context, user *types.User, kb *types.KnowledgeBase) (types.KBPermission, bool, error)
 	// FilterAccessibleSameTenant returns the subset of input KBs the user is
 	// allowed to view under the same-tenant rules. Cross-tenant KBs are returned
 	// unchanged so the caller's existing org-share logic stays authoritative.

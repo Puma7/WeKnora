@@ -175,6 +175,12 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewDatasetService))
 	must(container.Provide(service.NewEvaluationService))
 	must(container.Provide(service.NewUserService))
+	// NEU: same userService instance, exposed under the narrower TrustedUserProvisioner
+	// interface. Only callers that explicitly take TrustedUserProvisioner can use
+	// the gate-bypass methods; everyone else only sees UserService.
+	must(container.Provide(func(s interfaces.UserService) interfaces.TrustedUserProvisioner {
+		return s.(interfaces.TrustedUserProvisioner)
+	}))
 	must(container.Provide(service.NewInvitationService))
 	must(container.Provide(service.NewKBPermissionService))
 	must(container.Provide(service.NewWeKnoraCloudService))

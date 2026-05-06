@@ -105,10 +105,14 @@ func HashInvitationToken(rawToken string) string {
 
 // registrationOptions tunes Register behavior for trusted internal callers.
 type registrationOptions struct {
-	// SkipModeGate bypasses the REGISTRATION_MODE / DISABLE_REGISTRATION gate.
-	// Used by AutoSetup (Lite first-run) and OIDC auto-provisioning, where the
-	// deployment has already authorized the flow at the operator level.
+	// SkipModeGate bypasses the disabled/invite_only gate.
+	// Used by AutoSetup (Lite first-run) and OIDC auto-provisioning.
 	SkipModeGate bool
+	// SkipWhitelist bypasses the email-whitelist check. GEÄNDERT: split out so
+	// OIDC respects the whitelist (an operator that opts into whitelist + OIDC
+	// expects the whitelist to constrain federated logins too); only AutoSetup
+	// gets to skip it because the Lite default email may not match the list.
+	SkipWhitelist bool
 }
 
 // Register creates a new user account.
@@ -126,10 +130,17 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	return s.registerInternal(ctx, req, registrationOptions{})
 }
 
-// RegisterTrusted creates an account while bypassing the registration-mode gate.
-// Reserved for AutoSetup and OIDC auto-provisioning.
+// RegisterTrusted creates an account bypassing disabled/invite_only AND whitelist.
+// GEÄNDERT: now reserved for AutoSetup only — OIDC must use RegisterFromOIDC.
 func (s *userService) RegisterTrusted(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {
-	return s.registerInternal(ctx, req, registrationOptions{SkipModeGate: true})
+	return s.registerInternal(ctx, req, registrationOptions{SkipModeGate: true, SkipWhitelist: true})
+}
+
+// NEU: RegisterFromOIDC creates an account for a federated user. Bypasses the
+// disabled/invite_only gate (operator opted into OIDC) but enforces whitelist
+// so a public IdP can't onboard arbitrary domains into a whitelisted tenant.
+func (s *userService) RegisterFromOIDC(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {
+	return s.registerInternal(ctx, req, registrationOptions{SkipModeGate: true, SkipWhitelist: false})
 }
 
 func (s *userService) registerInternal(ctx context.Context, req *types.RegisterRequest, opts registrationOptions) (*types.User, error) {
@@ -159,15 +170,17 @@ func (s *userService) registerInternal(ctx context.Context, req *types.RegisterR
 		invitation = inv
 	}
 
-	// Mode-specific gating. Invitation OR a trusted internal call satisfies the gate.
-	if invitation == nil && !opts.SkipModeGate {
-		switch settings.Mode {
-		case types.RegistrationModeInviteOnly:
+	// Mode-specific gating. GEÄNDERT: split disabled/invite_only (SkipModeGate)
+	// from whitelist (SkipWhitelist) so OIDC can bypass the former without
+	// bypassing the latter — matches the operator's "whitelist constrains all
+	// onboarding paths" expectation.
+	if invitation == nil {
+		if !opts.SkipModeGate && settings.Mode == types.RegistrationModeInviteOnly {
 			return nil, errors.New("registration requires an invitation")
-		case types.RegistrationModeWhitelist:
-			if !settings.EmailMatchesWhitelist(emailLower) {
-				return nil, errors.New("email is not on the registration whitelist")
-			}
+		}
+		if !opts.SkipWhitelist && settings.Mode == types.RegistrationModeWhitelist &&
+			!settings.EmailMatchesWhitelist(emailLower) {
+			return nil, errors.New("email is not on the registration whitelist")
 		}
 	}
 
@@ -774,17 +787,23 @@ func (s *userService) UpdateUserRole(ctx context.Context, actor *types.User, tar
 		return nil, errors.New("cannot assign a role higher than your own")
 	}
 
-	// Prevent leaving the tenant ownerless via an atomic compare-and-set:
-	// only demote when there is still at least one OTHER active owner. This
-	// closes the TOCTOU race where two admins simultaneously demote the last
-	// two owners — the second update finds 0 other owners and refuses.
+	// Prevent leaving the tenant ownerless. GEÄNDERT: the repo now distinguishes
+	// "race lost" from "last owner" so we can surface accurate errors instead of
+	// reporting "only owner" when in reality another admin already demoted them.
 	if target.Role == types.UserRoleOwner && role != types.UserRoleOwner {
-		safe, err := s.userRepo.DemoteOwnerIfSafe(ctx, target.ID, target.TenantID, string(role))
+		safe, reason, err := s.userRepo.DemoteOwnerIfSafe(ctx, target.ID, target.TenantID, string(role))
 		if err != nil {
 			return nil, err
 		}
 		if !safe {
-			return nil, errors.New("cannot demote the only owner of the tenant")
+			switch reason {
+			case "last_owner":
+				return nil, errors.New("cannot demote the only owner of the tenant")
+			case "not_owner_anymore":
+				return nil, errors.New("user role was already changed by another admin; please refresh")
+			default:
+				return nil, errors.New("role update refused")
+			}
 		}
 		// Reload to reflect the persisted change (role + updated_at).
 		if reloaded, rerr := s.userRepo.GetUserByID(ctx, target.ID); rerr == nil && reloaded != nil {
@@ -1056,10 +1075,9 @@ func (s *userService) provisionOIDCUser(ctx context.Context, info *types.OIDCUse
 		return nil, fmt.Errorf("failed to generate password for OIDC user: %w", err)
 	}
 
-	// OIDC auto-provisioning bypasses the registration-mode gate: enabling OIDC
-	// on a deployment is itself an explicit operator decision to trust the IdP,
-	// so a successful federated login should always create the local account.
-	user, err := s.RegisterTrusted(ctx, &types.RegisterRequest{
+	// GEÄNDERT: use RegisterFromOIDC so the email whitelist (if configured)
+	// still applies to federated logins. Only AutoSetup may bypass whitelist.
+	user, err := s.RegisterFromOIDC(ctx, &types.RegisterRequest{
 		Username: username,
 		Email:    info.Email,
 		Password: randomPassword,

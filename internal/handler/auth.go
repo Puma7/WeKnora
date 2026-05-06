@@ -24,21 +24,24 @@ import (
 type AuthHandler struct {
 	userService   interfaces.UserService
 	tenantService interfaces.TenantService
-	configInfo    *config.Config
+	// GEÄNDERT: trustedProvisioner is a separate, narrower interface so the
+	// gate-bypass paths aren't reachable via UserService.
+	trustedProvisioner interfaces.TrustedUserProvisioner
+	configInfo         *config.Config
 }
 
-// NewAuthHandler creates a new auth handler instance with the provided services
-// Parameters:
-//   - userService: An implementation of the UserService interface for business logic
-//   - tenantService: An implementation of the TenantService interface for tenant management
-//
-// Returns a pointer to the newly created AuthHandler
+// NewAuthHandler creates a new auth handler instance with the provided services.
+// GEÄNDERT: now also injects TrustedUserProvisioner for the AutoSetup path.
 func NewAuthHandler(configInfo *config.Config,
-	userService interfaces.UserService, tenantService interfaces.TenantService) *AuthHandler {
+	userService interfaces.UserService,
+	tenantService interfaces.TenantService,
+	trustedProvisioner interfaces.TrustedUserProvisioner,
+) *AuthHandler {
 	return &AuthHandler{
-		configInfo:    configInfo,
-		userService:   userService,
-		tenantService: tenantService,
+		configInfo:         configInfo,
+		userService:        userService,
+		tenantService:      tenantService,
+		trustedProvisioner: trustedProvisioner,
 	}
 }
 
@@ -548,9 +551,10 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 		randomUsername := fmt.Sprintf("user_%s", base64.RawURLEncoding.EncodeToString(randomBytes[:6]))
 
 		// AutoSetup runs on Lite first-boot and must succeed even when
-		// REGISTRATION_MODE is invite_only/disabled — the operator hasn't had
-		// a chance to provision a tenant yet, so we bypass the gate explicitly.
-		_, err := h.userService.RegisterTrusted(ctx, &types.RegisterRequest{
+		// REGISTRATION_MODE is invite_only/disabled. GEÄNDERT: routes through
+		// the dedicated TrustedUserProvisioner interface instead of UserService,
+		// making the gate-bypass explicit at the DI level.
+		_, err := h.trustedProvisioner.RegisterTrusted(ctx, &types.RegisterRequest{
 			Username: randomUsername,
 			Email:    defaultEmail,
 			Password: randomPassword,

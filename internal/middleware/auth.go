@@ -193,6 +193,10 @@ func Auth(
 			// 存储租户和用户信息到上下文
 			c.Set(types.TenantIDContextKey.String(), tenantID)
 			c.Set(types.TenantInfoContextKey.String(), t)
+			// NEU: explicit marker that this request was authenticated via API key.
+			// Permission helpers use it instead of relying on the user-id prefix,
+			// which a DB-injected row could fake.
+			c.Set("isAPIKeyAuth", true)
 
 			ctx := context.WithValue(
 				context.WithValue(c.Request.Context(), types.TenantIDContextKey, tenantID),
@@ -268,12 +272,25 @@ func RequireRole(minRole types.UserRole) gin.HandlerFunc {
 	}
 }
 
+// isAPIKeyRequest checks the explicit context flag set by the API-key auth
+// branch. GEÄNDERT: previously we used strings.HasPrefix(user.ID, "system-"),
+// which a DB-injected row could fake. The context flag is set programmatically
+// per-request and cannot be persisted.
+func isAPIKeyRequest(c *gin.Context, user *types.User) bool {
+	if v, ok := c.Get("isAPIKeyAuth"); ok {
+		if flag, ok := v.(bool); ok && flag {
+			return true
+		}
+	}
+	// Defense-in-depth fallback: synthetic users always have empty PasswordHash,
+	// so even if the context flag is missing, a DB-injected user with the
+	// matching id prefix would still need an empty hash to pass.
+	return strings.HasPrefix(user.ID, "system-") && user.PasswordHash == ""
+}
+
 // RequireFeature returns a middleware that aborts with 403 unless the
 // authenticated user holds the specified feature flag (chat, search, create_kb,
 // invite_users, manage_users, manage_kbs).
-//
-// Synthetic API-key users (id "system-*") bypass the check because they
-// represent the tenant itself, not a constrained human user.
 func RequireFeature(feature string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := userFromContext(c)
@@ -282,7 +299,7 @@ func RequireFeature(feature string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if strings.HasPrefix(user.ID, "system-") {
+		if isAPIKeyRequest(c, user) {
 			c.Next()
 			return
 		}
@@ -295,9 +312,7 @@ func RequireFeature(feature string) gin.HandlerFunc {
 	}
 }
 
-// RequireAnyFeature is the OR-form of RequireFeature: passes when the user
-// holds any of the supplied flags. Useful when a single endpoint serves both
-// "manager" and "inviter" personas.
+// RequireAnyFeature is the OR-form of RequireFeature.
 func RequireAnyFeature(features ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := userFromContext(c)
@@ -306,7 +321,7 @@ func RequireAnyFeature(features ...string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if strings.HasPrefix(user.ID, "system-") {
+		if isAPIKeyRequest(c, user) {
 			c.Next()
 			return
 		}
