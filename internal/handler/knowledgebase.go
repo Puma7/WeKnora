@@ -929,15 +929,24 @@ func (h *KnowledgeBaseHandler) RecoverKnowledgeBase(c *gin.Context) {
 		}
 	}
 
-	var reparsedFailed, reparsedFailedErrs int
+	// Bound the synchronous reparse work per request so the HTTP call
+	// can't spend minutes serially calling cleanupKnowledgeResources +
+	// Enqueue for thousands of failed rows. Reverse proxies time out
+	// long before that. User can call /recover repeatedly until
+	// failed_remaining == 0.
+	const reparseBudget = 100
+	var reparsedFailed, reparsedFailedErrs, failedRemaining int
 	if includeFailed && h.knowledgeRepo != nil && h.knowledgeService != nil {
-		// List failed knowledge in this KB and reparse each.
 		all, err := h.knowledgeRepo.ListKnowledgeByKnowledgeBaseID(ctx, kb.TenantID, kbID)
 		if err != nil {
 			logger.Warnf(ctx, "[Recover] list failed knowledge: %v", err)
 		} else {
 			for _, k := range all {
 				if k.ParseStatus != types.ParseStatusFailed {
+					continue
+				}
+				if reparsedFailed+reparsedFailedErrs >= reparseBudget {
+					failedRemaining++
 					continue
 				}
 				reparseCtx := context.WithValue(ctx, types.TenantIDContextKey, k.TenantID)
@@ -952,19 +961,20 @@ func (h *KnowledgeBaseHandler) RecoverKnowledgeBase(c *gin.Context) {
 	}
 
 	logger.Infof(ctx,
-		"[Recover] KB %s done: requeued=%d archived_remaining=%d reparsed_failed=%d errs=%d",
-		kbID, requeued, archivedRemaining, reparsedFailed, reparsedFailedErrs,
+		"[Recover] KB %s done: requeued=%d archived_remaining=%d reparsed_failed=%d errs=%d failed_remaining=%d",
+		kbID, requeued, archivedRemaining, reparsedFailed, reparsedFailedErrs, failedRemaining,
 	)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"kb_id":                kbID,
-			"requeued":             requeued,
-			"archived_remaining":   archivedRemaining,
-			"skipped_not_in_kb":    skippedNotInKB,
-			"reparsed_failed":      reparsedFailed,
-			"reparse_failed_errs":  reparsedFailedErrs,
-			"include_failed":       includeFailed,
+			"kb_id":               kbID,
+			"requeued":            requeued,
+			"archived_remaining":  archivedRemaining,
+			"skipped_not_in_kb":   skippedNotInKB,
+			"reparsed_failed":     reparsedFailed,
+			"reparse_failed_errs": reparsedFailedErrs,
+			"failed_remaining":    failedRemaining,
+			"include_failed":      includeFailed,
 		},
 	})
 }

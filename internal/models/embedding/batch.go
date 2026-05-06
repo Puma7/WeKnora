@@ -28,11 +28,11 @@ func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, 
 	var wg sync.WaitGroup
 	var mu sync.Mutex  // For synchronizing access to error
 	var firstErr error // Record the first error that occurs
-	// Default 16 is a reasonable middle ground: small enough to not blow
-	// up on tiny embed models, large enough to keep modern batch-friendly
-	// embedders (Nemotron, BGE-M3, OpenAI) busy. Recommended override for
-	// Nemotron-class models: 32-64. Set BATCH_EMBED_SIZE to tune.
-	batchSize := 16
+	// Default kept at 5 so existing setups (smaller Ollama instances,
+	// stricter API rate limits like OpenAI free tier, Aliyun, etc.) keep
+	// working unchanged. Recommended override for batch-friendly
+	// embedders (Nemotron, BGE-M3): 16-64 via BATCH_EMBED_SIZE env.
+	batchSize := 5
 	if v := os.Getenv("BATCH_EMBED_SIZE"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 			batchSize = parsed

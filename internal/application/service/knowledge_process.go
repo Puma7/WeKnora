@@ -1336,11 +1336,11 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 			}
 			processedCount++
 			localProgress := processedCount
-			mu.Unlock()
-
-			// Heartbeat / progress every 50 processed items. Localprogress
-			// is taken under lock so we get a real "n out of total" — not
-			// an out-of-order view.
+			// Heartbeat / progress every 50 processed items, written
+			// while still holding the lock so DB writes are serialized
+			// in increasing order — without the lock, two goroutines
+			// could write "100/N" before "50/N" lands and the UI would
+			// see progress jump backward.
 			if localProgress%50 == 0 {
 				if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, localProgress, len(work)); err != nil {
 					logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", localProgress, err)
@@ -1349,6 +1349,7 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 					logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", localProgress, err)
 				}
 			}
+			mu.Unlock()
 			return nil
 		})
 	}
@@ -1511,6 +1512,10 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return nil, werrors.NewBadRequestError("无法获取手工知识内容")
 		}
 
+		// Same rationale as the non-manual path below: kill any stale
+		// task with the deterministic ID so our fresh enqueue wins.
+		killTaskByDeterministicID(ManualProcessTaskID(knowledgeID))
+
 		existing.ParseStatus = "pending"
 		existing.EnableStatus = "disabled"
 		existing.Description = ""
@@ -1530,6 +1535,15 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 		}
 		return existing, nil
 	}
+
+	// User explicitly asked to reparse. If a previous task with the
+	// same deterministic ID is still pending/scheduled/retrying, our
+	// fresh Enqueue would silently no-op via ErrTaskIDConflict and the
+	// stale task would run with a now-cleaned knowledge. Kill it first
+	// so the new Enqueue actually wins. Active (running) tasks can't be
+	// deleted; in that rare case the running task will finish first
+	// and our new Enqueue will follow.
+	killTaskByDeterministicID(DocProcessTaskID(knowledgeID))
 
 	// For non-manual knowledge, cleanup synchronously then enqueue document processing
 	logger.Infof(ctx, "Cleaning up existing resources for knowledge: %s", knowledgeID)

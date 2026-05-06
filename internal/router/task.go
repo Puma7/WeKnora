@@ -116,16 +116,12 @@ func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 
 func NewAsynqServer() *asynq.Server {
 	opt := getAsynqRedisClientOpt()
-	// Concurrency is the *total* number of worker goroutines across all
-	// queues; the priority weights below only govern dispatch ratio. The
-	// asynq library default is 10. For bulk-ingest workloads (thousands of
-	// documents) raise this to 32+ via WEKNORA_ASYNQ_CONCURRENCY so that a
-	// few long-running tasks (Wiki ingest, Question Generation) don't
-	// monopolize all worker slots and starve fresh document processing.
-	concurrency := envIntDefault("WEKNORA_ASYNQ_CONCURRENCY", 10)
-	if concurrency == 0 {
-		concurrency = 10
-	}
+	// Concurrency = total number of worker goroutines across all queues;
+	// the priority weights below only govern dispatch ratio. asynq's own
+	// default (when Concurrency=0) is runtime.NumCPU() — see asynq
+	// server.go:451. We pass 0 by default so high-core hosts use all
+	// available cores. Set WEKNORA_ASYNQ_CONCURRENCY=N to pin to N.
+	concurrency := envIntDefault("WEKNORA_ASYNQ_CONCURRENCY", 0)
 	srv := asynq.NewServer(
 		opt,
 		asynq.Config{

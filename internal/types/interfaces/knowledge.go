@@ -230,8 +230,15 @@ type KnowledgeRepository interface {
 	SetAIGSProgress(ctx context.Context, id string, done, total int) error
 	// ListStuckKnowledge returns knowledge rows in parse_status='processing'
 	// whose heartbeat (processing_started_at) is older than threshold. Used
-	// by the reconciler to find candidates for requeue or fail.
+	// by the reconciler to find candidates for requeue or fail. NULL
+	// heartbeats are excluded — see ListUnobservedKnowledge.
 	ListStuckKnowledge(ctx context.Context, threshold time.Time, limit int) ([]*types.Knowledge, error)
+	// ListUnobservedKnowledge returns knowledge rows in
+	// parse_status='processing' with NULL heartbeat (pre-migration or
+	// not-yet-observed). Reconciler stamps these so they enter the stuck
+	// scan only after a full grace period — protects in-flight tasks
+	// whose enqueue predated the deterministic-task-ID change.
+	ListUnobservedKnowledge(ctx context.Context, limit int) ([]*types.Knowledge, error)
 	// ListStuckSummary mirrors ListStuckKnowledge for summary_status.
 	ListStuckSummary(ctx context.Context, threshold time.Time, limit int) ([]*types.Knowledge, error)
 }

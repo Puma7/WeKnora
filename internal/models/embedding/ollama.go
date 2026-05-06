@@ -30,38 +30,61 @@ func ollamaEmbedTimeout() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// ollamaEmbedMaxAttempts is how many times to retry a transient Embed
-// failure before surfacing the error. Default 3 (initial + 2 retries).
+// ollamaEmbedMaxAttempts is how many times to attempt a single Embed
+// call (initial + retries). Default 2 (one retry only). Higher values
+// magnify total wall time on flapping endpoints — combined with the
+// 60s per-call timeout, attempts=2 gives at most ~120s + 1s backoff =
+// 121s per batch, well within docProcess timeouts.
 func ollamaEmbedMaxAttempts() int {
 	v := strings.TrimSpace(os.Getenv("WEKNORA_EMBED_MAX_ATTEMPTS"))
 	if v == "" {
-		return 3
+		return 2
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
-		return 3
+		return 2
 	}
 	return n
 }
 
 // isTransientEmbedError returns true for errors that suggest retrying
-// might help: connection refused, EOF, context deadline (per-call timeout
-// already adds a budget), Ollama 5xx, HTTP 429. We deliberately do NOT
-// retry on context.Canceled — a higher-level cancellation must propagate.
+// might help. We're deliberately conservative: it's better to surface a
+// real failure quickly than to mask it with retries that exhaust the
+// task budget. Specifically:
+//   - context.Canceled / DeadlineExceeded propagate as-is — retrying
+//     past our own deadline is wasteful, and parent cancellation must
+//     win.
+//   - HTTP 5xx / 429 / connection-level errors retry.
+//   - We do NOT retry on substrings like "500" or "eof" alone — those
+//     match payload content too easily and produce false positives.
 func isTransientEmbedError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	transientFragments := []string{
-		"timeout", "deadline exceeded", "connection refused", "eof",
-		"reset by peer", "no route to host", "no such host",
-		"500", "502", "503", "504", "429", "temporarily unavailable",
+	// Network-layer errors that warrant retry.
+	netSignals := []string{
+		"connection refused", "connection reset",
+		"reset by peer", "broken pipe",
+		"no route to host", "no such host",
+		"i/o timeout", "tls handshake",
 	}
-	for _, frag := range transientFragments {
+	for _, frag := range netSignals {
+		if strings.Contains(msg, frag) {
+			return true
+		}
+	}
+	// HTTP server-side throttling / overload (matched as " <code>" or
+	// "status <code>" to avoid colliding with chunk content).
+	httpSignals := []string{
+		"status 500", "status 502", "status 503", "status 504", "status 429",
+		"http 500", "http 502", "http 503", "http 504", "http 429",
+		"temporarily unavailable", "too many requests",
+	}
+	for _, frag := range httpSignals {
 		if strings.Contains(msg, frag) {
 			return true
 		}
@@ -182,8 +205,10 @@ func (e *OllamaEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		if !isTransientEmbedError(attemptErr) || attempt == maxAttempts-1 {
 			return nil, fmt.Errorf("failed to get embedding vectors: %w", attemptErr)
 		}
-		// Exponential backoff with jitter: 1s, 4s, 16s.
-		backoff := time.Duration(1<<(2*attempt)) * time.Second
+		// Linear backoff with jitter: 1s, 2s, 4s, ... — keeps total
+		// retry budget bounded by maxAttempts so a flapping endpoint
+		// can't burn the parent task's timeout on a single batch.
+		backoff := time.Duration(1<<attempt) * time.Second
 		jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
 		logger.GetLogger(ctx).Warnf("ollama embed attempt %d/%d failed: %v, retrying in %v",
 			attempt+1, maxAttempts, attemptErr, backoff+jitter)

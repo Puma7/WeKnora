@@ -101,6 +101,24 @@ func (r *KnowledgeReconciler) cycle(ctx context.Context) error {
 	inspector := asynq.NewInspector(r.redisOpt)
 	defer inspector.Close()
 
+	// Phase 1: stamp pre-migration / not-yet-observed rows so they enter
+	// the stuck scan only after a full grace period. This protects
+	// in-flight tasks whose asynq task IDs are random UUIDs (pre-PR2)
+	// and would otherwise be misclassified as orphans on first cycle.
+	unobserved, err := r.repo.ListUnobservedKnowledge(ctx, 1000)
+	if err != nil {
+		logger.Warnf(ctx, "[Reconciler] list unobserved: %v", err)
+	}
+	stamped := 0
+	for _, k := range unobserved {
+		if err := r.repo.TouchProcessingHeartbeat(ctx, k.ID); err != nil {
+			logger.Warnf(ctx, "[Reconciler] grace-stamp %s: %v", k.ID, err)
+			continue
+		}
+		stamped++
+	}
+
+	// Phase 2: scan rows whose heartbeat IS set and older than threshold.
 	parseRows, err := r.repo.ListStuckKnowledge(ctx, threshold, 200)
 	if err != nil {
 		return fmt.Errorf("list stuck parsing: %w", err)
@@ -124,10 +142,10 @@ func (r *KnowledgeReconciler) cycle(ctx context.Context) error {
 		}
 	}
 
-	if len(parseRows) > 0 || requeued > 0 || failedCount > 0 {
+	if len(parseRows) > 0 || requeued > 0 || failedCount > 0 || stamped > 0 {
 		logger.Infof(ctx,
-			"[Reconciler] cycle: parse(stuck=%d live=%d requeued=%d failed=%d errors=%d)",
-			len(parseRows), live, requeued, failedCount, errCount,
+			"[Reconciler] cycle: grace_stamped=%d parse(stuck=%d live=%d requeued=%d failed=%d errors=%d)",
+			stamped, len(parseRows), live, requeued, failedCount, errCount,
 		)
 	}
 	return nil

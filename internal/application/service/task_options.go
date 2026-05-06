@@ -36,6 +36,64 @@ func IsTaskIDConflict(err error) bool {
 	return errors.Is(err, asynq.ErrTaskIDConflict)
 }
 
+// buildInspector constructs an *asynq.Inspector against the configured
+// Redis broker. Returns nil when REDIS_ADDR is not set (Lite mode),
+// signalling the caller to skip Inspector-based logic.
+func buildInspector() *asynq.Inspector {
+	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	if addr == "" {
+		return nil
+	}
+	db := 0
+	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
+		if parsed, err := strconv.Atoi(dbStr); err == nil {
+			db = parsed
+		}
+	}
+	readMs := 3000
+	writeMs := 3000
+	if v := strings.TrimSpace(os.Getenv("WEKNORA_REDIS_READ_TIMEOUT_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			readMs = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("WEKNORA_REDIS_WRITE_TIMEOUT_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			writeMs = n
+		}
+	}
+	return asynq.NewInspector(&asynq.RedisClientOpt{
+		Addr:         addr,
+		Username:     os.Getenv("REDIS_USERNAME"),
+		Password:     os.Getenv("REDIS_PASSWORD"),
+		DB:           db,
+		ReadTimeout:  time.Duration(readMs) * time.Millisecond,
+		WriteTimeout: time.Duration(writeMs) * time.Millisecond,
+	})
+}
+
+// killTaskByDeterministicID deletes a task with the given deterministic
+// ID across all queues if it exists in any non-terminal state. Used by
+// ReparseKnowledge to make sure a fresh enqueue is not silently shadowed
+// by a still-pending old task. No-op in Lite mode (no inspector). Errors
+// are logged but never propagated — they only mean "we couldn't delete";
+// the subsequent Enqueue will then either succeed or hit
+// ErrTaskIDConflict, which the caller handles.
+func killTaskByDeterministicID(taskID string) {
+	insp := buildInspector()
+	if insp == nil {
+		return
+	}
+	defer insp.Close()
+	for _, q := range []string{"critical", "default", "low"} {
+		// DeleteTask works for pending, scheduled, retry, archived. For
+		// active tasks (currently running) it returns an error — we
+		// silently ignore: a running task will finish and the subsequent
+		// Enqueue will overlap, which the caller can handle.
+		_ = insp.DeleteTask(q, taskID)
+	}
+}
+
 // envDurationDefault parses a duration env var like "30m" or "1800s".
 // Falls back to def when unset, empty, or unparseable.
 func envDurationDefault(key string, def time.Duration) time.Duration {
@@ -66,14 +124,12 @@ func envIntDefault(key string, def int) int {
 
 // Per-task timeouts.
 //
-// Without these, asynq's default 30-minute task timeout applies to every
-// handler. For a Knowledge with thousands of chunks, sequential AIGS or
-// Wiki ingest can run longer; conversely, ProcessDocument should usually
-// finish within minutes and a 30-minute hang likely means a stuck Ollama
-// or DocReader call. Per-task budgets bound worker hold time.
-//
-// All defaults are overridable. They preserve existing behaviour for small
-// setups and only matter at scale.
+// asynq's library default (when no Timeout option is passed) is 30 minutes.
+// We set explicit values so we can a) raise the cap for long-running QG
+// over thousands of chunks and b) keep the orchestration tasks at the
+// existing 30-minute floor without surprising drops below it. Defaults
+// must NEVER be lower than asynq's 30-minute default — that would be a
+// silent regression for workloads that worked before.
 
 func docProcessTimeout() time.Duration {
 	return envDurationDefault("WEKNORA_DOC_PROCESS_TIMEOUT", 30*time.Minute)
@@ -87,12 +143,18 @@ func summaryTimeout() time.Duration {
 	return envDurationDefault("WEKNORA_SUMMARY_TIMEOUT", 30*time.Minute)
 }
 
+// postProcessTimeout — orchestration only (DB reads + a handful of
+// Enqueue calls). 30m is far more than needed but matches asynq default
+// to avoid regressing any workload that previously got the implicit 30m.
 func postProcessTimeout() time.Duration {
-	return envDurationDefault("WEKNORA_POSTPROCESS_TIMEOUT", 10*time.Minute)
+	return envDurationDefault("WEKNORA_POSTPROCESS_TIMEOUT", 30*time.Minute)
 }
 
+// imageMultimodalTimeout — VLM OCR + Caption per image. Some VLMs
+// running locally on CPU can take many minutes per image. 30m default
+// matches the asynq fallback; raise for slower hosts.
 func imageMultimodalTimeout() time.Duration {
-	return envDurationDefault("WEKNORA_IMAGE_TIMEOUT", 20*time.Minute)
+	return envDurationDefault("WEKNORA_IMAGE_TIMEOUT", 30*time.Minute)
 }
 
 // llmCallTimeout caps a single LLM Chat call (Question Generation,

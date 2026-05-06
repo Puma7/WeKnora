@@ -616,10 +616,12 @@ func (r *knowledgeRepository) SetAIGSProgress(ctx context.Context, id string, do
 }
 
 // ListStuckKnowledge returns rows in parse_status='processing' whose
-// heartbeat (processing_started_at) is older than threshold OR is NULL.
-// NULL handling is important: rows that pre-date this migration have no
-// heartbeat — by treating them as "stuck" we let the reconciler settle
-// any historical orphans on its first run.
+// heartbeat (processing_started_at) is older than threshold. Rows with
+// NULL heartbeat are EXCLUDED — they predate the migration / first task
+// pickup and might still be served by an old asynq task whose ID we can't
+// match (because deterministic IDs were introduced together with the
+// heartbeat). The reconciler stamps them on first observation, giving
+// them a fresh threshold window before any action is taken.
 func (r *knowledgeRepository) ListStuckKnowledge(
 	ctx context.Context, threshold time.Time, limit int,
 ) ([]*types.Knowledge, error) {
@@ -628,7 +630,7 @@ func (r *knowledgeRepository) ListStuckKnowledge(
 	}
 	var out []*types.Knowledge
 	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
-		Where("parse_status = ? AND (processing_started_at IS NULL OR processing_started_at < ?)",
+		Where("parse_status = ? AND processing_started_at IS NOT NULL AND processing_started_at < ?",
 			types.ParseStatusProcessing, threshold).
 		Order("updated_at ASC").
 		Limit(limit).
@@ -636,7 +638,29 @@ func (r *knowledgeRepository) ListStuckKnowledge(
 	return out, err
 }
 
-// ListStuckSummary mirrors ListStuckKnowledge for summary_status.
+// ListUnobservedKnowledge returns rows in parse_status='processing' that
+// have NULL processing_started_at. These are pre-migration rows or rows
+// whose worker hasn't yet recorded a heartbeat. The reconciler stamps
+// them on first sight so they enter ListStuckKnowledge's purview only
+// after a full grace period.
+func (r *knowledgeRepository) ListUnobservedKnowledge(
+	ctx context.Context, limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out []*types.Knowledge
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("parse_status = ? AND processing_started_at IS NULL",
+			types.ParseStatusProcessing).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	return out, err
+}
+
+// ListStuckSummary mirrors ListStuckKnowledge for summary_status. Same
+// NULL-grace policy applies.
 func (r *knowledgeRepository) ListStuckSummary(
 	ctx context.Context, threshold time.Time, limit int,
 ) ([]*types.Knowledge, error) {
@@ -645,7 +669,7 @@ func (r *knowledgeRepository) ListStuckSummary(
 	}
 	var out []*types.Knowledge
 	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
-		Where("summary_status = ? AND (processing_started_at IS NULL OR processing_started_at < ?)",
+		Where("summary_status = ? AND processing_started_at IS NOT NULL AND processing_started_at < ?",
 			types.SummaryStatusProcessing, threshold).
 		Order("updated_at ASC").
 		Limit(limit).
