@@ -10,6 +10,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/Tencent/WeKnora/internal/utils"
 	"github.com/robfig/cron/v3"
 )
 
@@ -86,7 +87,8 @@ func (w *KnowledgeWatchdog) scan(ctx context.Context) {
 	for _, k := range stuck {
 		logger.Warnf(ctx,
 			"[KnowledgeWatchdog] stuck processing task detected: knowledge_id=%s tenant_id=%d kb_id=%s file_name=%q updated_at=%s threshold=%s",
-			k.ID, k.TenantID, k.KnowledgeBaseID, k.FileName, k.UpdatedAt.Format(time.RFC3339), w.threshold,
+			k.ID, k.TenantID, k.KnowledgeBaseID, utils.SanitizeForLog(k.FileName),
+			k.UpdatedAt.Format(time.RFC3339), w.threshold,
 		)
 	}
 }

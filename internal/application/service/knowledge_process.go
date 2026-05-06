@@ -675,15 +675,41 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 	// document, then enrich with image info in a second pass. Enrichment must
 	// happen AFTER concatenation because StartAt is based on original document
 	// offsets — enriched (longer) content would break the positioning.
-	chunkContents := ""
+	//
+	// Pre-allocate a rune buffer so each chunk is placed via copy() instead
+	// of rebuilding the entire string per iteration. Previous shape was
+	// O(N²) in chunk count; now O(total runes).
+	maxEnd := 0
 	for _, chunk := range sortedChunks {
-		runes := []rune(chunkContents)
-		if chunk.StartAt <= len(runes) {
-			chunkContents = string(runes[:chunk.StartAt]) + chunk.Content
-		} else {
-			chunkContents = chunkContents + chunk.Content
+		if chunk.EndAt > maxEnd {
+			maxEnd = chunk.EndAt
 		}
 	}
+	buf := make([]rune, 0, maxEnd)
+	for _, chunk := range sortedChunks {
+		chunkRunes := []rune(chunk.Content)
+		if chunk.StartAt <= len(buf) {
+			// In-range: overwrite from StartAt and extend the slice if the
+			// chunk runs past the current tail. Mirrors the legacy
+			// `runes[:StartAt] + chunk.Content` truncate-then-append.
+			needed := chunk.StartAt + len(chunkRunes)
+			if needed > cap(buf) {
+				newBuf := make([]rune, needed)
+				copy(newBuf, buf)
+				buf = newBuf
+			} else if needed > len(buf) {
+				buf = buf[:needed]
+			}
+			copy(buf[chunk.StartAt:], chunkRunes)
+		} else {
+			// Gap: legacy behaviour appended literally and ignored the
+			// gap, so a chunk with StartAt > len(buf) lands directly
+			// after the existing content rather than at its absolute
+			// offset. Preserved verbatim.
+			buf = append(buf, chunkRunes...)
+		}
+	}
+	chunkContents := string(buf)
 
 	// Collect image_info from image_ocr/image_caption children and enrich
 	chunkIDs := make([]string, len(sortedChunks))
