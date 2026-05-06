@@ -224,6 +224,10 @@ type KnowledgeRepository interface {
 	// knowledge ID. Called by workers periodically during long-running ingest
 	// so the reconciler can distinguish "still working" from "stuck".
 	TouchProcessingHeartbeat(ctx context.Context, id string) error
+	// BulkStampProcessingStartedAt sets processing_started_at = when for all
+	// rows in ids in a single UPDATE. Used by the reconciler to grace-stamp
+	// pre-migration rows without N+1 round-trips.
+	BulkStampProcessingStartedAt(ctx context.Context, ids []string, when time.Time) (int64, error)
 	// SetChunkProgress updates chunks_total and chunks_done atomically.
 	SetChunkProgress(ctx context.Context, id string, done, total int) error
 	// SetAIGSProgress updates aigs_chunks_total and aigs_chunks_done atomically.

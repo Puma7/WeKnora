@@ -2,9 +2,11 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -34,6 +36,29 @@ func SummaryTaskID(knowledgeID string) string      { return "summary-" + knowled
 // work, so we can treat it as success."
 func IsTaskIDConflict(err error) bool {
 	return errors.Is(err, asynq.ErrTaskIDConflict)
+}
+
+// ErrTaskBusy signals that a deterministic-ID task is currently running
+// (asynq's DeleteTask refuses to delete active tasks). Callers must
+// abort destructive ops like cleanupKnowledgeResources when this fires
+// — letting the running task finish first is safer than racing it.
+var ErrTaskBusy = errors.New("task is currently executing")
+
+// inspectorOnce + inspectorVal: process-wide singleton. asynq.Inspector
+// holds a Redis client; reusing one connection is far cheaper than
+// creating one per ReparseKnowledge call (which the recover endpoint
+// can fan out to 100+ in a single request).
+var (
+	inspectorOnce sync.Once
+	inspectorVal  *asynq.Inspector
+)
+
+// sharedInspector returns the process-wide inspector. nil in Lite mode.
+func sharedInspector() *asynq.Inspector {
+	inspectorOnce.Do(func() {
+		inspectorVal = buildInspector()
+	})
+	return inspectorVal
 }
 
 // buildInspector constructs an *asynq.Inspector against the configured
@@ -73,25 +98,30 @@ func buildInspector() *asynq.Inspector {
 }
 
 // killTaskByDeterministicID deletes a task with the given deterministic
-// ID across all queues if it exists in any non-terminal state. Used by
-// ReparseKnowledge to make sure a fresh enqueue is not silently shadowed
-// by a still-pending old task. No-op in Lite mode (no inspector). Errors
-// are logged but never propagated — they only mean "we couldn't delete";
-// the subsequent Enqueue will then either succeed or hit
-// ErrTaskIDConflict, which the caller handles.
-func killTaskByDeterministicID(taskID string) {
-	insp := buildInspector()
+// ID across all queues. Returns nil when the task was deleted or never
+// existed; returns ErrTaskBusy when at least one queue reported the
+// task was active (asynq's DeleteTask returns a non-typed error in that
+// case — anything that's not ErrTaskNotFound / ErrQueueNotFound is
+// treated as "active or broken broker"). The caller MUST abort
+// destructive operations (cleanup, status reset, fresh enqueue) on a
+// non-nil return so a still-running worker can finish without racing
+// against state we just wiped. No-op (returns nil) in Lite mode.
+func killTaskByDeterministicID(taskID string) error {
+	insp := sharedInspector()
 	if insp == nil {
-		return
+		return nil
 	}
-	defer insp.Close()
 	for _, q := range []string{"critical", "default", "low"} {
-		// DeleteTask works for pending, scheduled, retry, archived. For
-		// active tasks (currently running) it returns an error — we
-		// silently ignore: a running task will finish and the subsequent
-		// Enqueue will overlap, which the caller can handle.
-		_ = insp.DeleteTask(q, taskID)
+		err := insp.DeleteTask(q, taskID)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, asynq.ErrTaskNotFound) || errors.Is(err, asynq.ErrQueueNotFound) {
+			continue
+		}
+		return fmt.Errorf("delete %s in queue %s: %w", taskID, q, ErrTaskBusy)
 	}
+	return nil
 }
 
 // envDurationDefault parses a duration env var like "30m" or "1800s".

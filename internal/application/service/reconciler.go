@@ -102,20 +102,30 @@ func (r *KnowledgeReconciler) cycle(ctx context.Context) error {
 	defer inspector.Close()
 
 	// Phase 1: stamp pre-migration / not-yet-observed rows so they enter
-	// the stuck scan only after a full grace period. This protects
-	// in-flight tasks whose asynq task IDs are random UUIDs (pre-PR2)
-	// and would otherwise be misclassified as orphans on first cycle.
+	// the stuck scan after a SHORTER grace period (default 15min) than
+	// the normal stuck threshold (default 2h). The stamp is back-dated
+	// by (stuckThreshold - gracePeriod) so the row appears "almost
+	// stuck" — a real worker heartbeat will refresh it well before the
+	// next cycle and remove it from the scan; a genuinely orphaned row
+	// will get classified within ~gracePeriod instead of waiting the
+	// full threshold.
+	gracePeriod := envDurationDefault("WEKNORA_RECONCILE_GRACE_PERIOD", 15*time.Minute)
+	stuckThreshold := reconcileStuckThreshold()
+	backdate := time.Now().Add(-(stuckThreshold - gracePeriod))
+	if backdate.After(time.Now()) {
+		backdate = time.Now()
+	}
 	unobserved, err := r.repo.ListUnobservedKnowledge(ctx, 1000)
 	if err != nil {
 		logger.Warnf(ctx, "[Reconciler] list unobserved: %v", err)
 	}
-	stamped := 0
+	ids := make([]string, 0, len(unobserved))
 	for _, k := range unobserved {
-		if err := r.repo.TouchProcessingHeartbeat(ctx, k.ID); err != nil {
-			logger.Warnf(ctx, "[Reconciler] grace-stamp %s: %v", k.ID, err)
-			continue
-		}
-		stamped++
+		ids = append(ids, k.ID)
+	}
+	stamped, err := r.repo.BulkStampProcessingStartedAt(ctx, ids, backdate)
+	if err != nil {
+		logger.Warnf(ctx, "[Reconciler] bulk grace-stamp: %v", err)
 	}
 
 	// Phase 2: scan rows whose heartbeat IS set and older than threshold.

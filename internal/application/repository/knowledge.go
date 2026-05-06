@@ -595,6 +595,20 @@ func (r *knowledgeRepository) TouchProcessingHeartbeat(ctx context.Context, id s
 		Update("processing_started_at", now).Error
 }
 
+// BulkStampProcessingStartedAt writes processing_started_at = when for
+// every row in ids in a single statement. Returns rows affected.
+func (r *knowledgeRepository) BulkStampProcessingStartedAt(
+	ctx context.Context, ids []string, when time.Time,
+) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id IN ?", ids).
+		Update("processing_started_at", when)
+	return res.RowsAffected, res.Error
+}
+
 // SetChunkProgress writes chunks_done/_total in a single UPDATE.
 func (r *knowledgeRepository) SetChunkProgress(ctx context.Context, id string, done, total int) error {
 	return r.db.WithContext(ctx).Model(&types.Knowledge{}).

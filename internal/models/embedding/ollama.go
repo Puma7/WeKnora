@@ -48,21 +48,22 @@ func ollamaEmbedMaxAttempts() int {
 }
 
 // isTransientEmbedError returns true for errors that suggest retrying
-// might help. We're deliberately conservative: it's better to surface a
-// real failure quickly than to mask it with retries that exhaust the
-// task budget. Specifically:
-//   - context.Canceled / DeadlineExceeded propagate as-is — retrying
-//     past our own deadline is wasteful, and parent cancellation must
-//     win.
-//   - HTTP 5xx / 429 / connection-level errors retry.
-//   - We do NOT retry on substrings like "500" or "eof" alone — those
-//     match payload content too easily and produce false positives.
+// might help. context.Canceled propagates as-is (parent task cancelled,
+// no point retrying). context.DeadlineExceeded IS transient: it means
+// either our per-call timeout fired (retry handles this) or the parent
+// task timeout fired (the next iteration's ctx.Err() check exits the
+// loop). HTTP 5xx / 429 / connection-level errors also retry. We do NOT
+// match generic substrings like "500" or "eof" — those collide with
+// payload content.
 func isTransientEmbedError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	// Network-layer errors that warrant retry.
@@ -71,6 +72,8 @@ func isTransientEmbedError(err error) bool {
 		"reset by peer", "broken pipe",
 		"no route to host", "no such host",
 		"i/o timeout", "tls handshake",
+		"client.timeout",            // net/http Client.Timeout wording
+		"context deadline exceeded", // wrapped ctx errors
 	}
 	for _, frag := range netSignals {
 		if strings.Contains(msg, frag) {
@@ -205,10 +208,10 @@ func (e *OllamaEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		if !isTransientEmbedError(attemptErr) || attempt == maxAttempts-1 {
 			return nil, fmt.Errorf("failed to get embedding vectors: %w", attemptErr)
 		}
-		// Linear backoff with jitter: 1s, 2s, 4s, ... — keeps total
+		// Linear backoff with jitter: 1s, 2s, 3s, ... — keeps total
 		// retry budget bounded by maxAttempts so a flapping endpoint
 		// can't burn the parent task's timeout on a single batch.
-		backoff := time.Duration(1<<attempt) * time.Second
+		backoff := time.Duration(attempt+1) * time.Second
 		jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
 		logger.GetLogger(ctx).Warnf("ollama embed attempt %d/%d failed: %v, retrying in %v",
 			attempt+1, maxAttempts, attemptErr, backoff+jitter)

@@ -121,7 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_knowledges_enable_status ON knowledges(enable_sta
 CREATE INDEX IF NOT EXISTS idx_knowledges_tag ON knowledges(tag_id);
 CREATE INDEX IF NOT EXISTS idx_knowledges_summary_status ON knowledges(summary_status);
 CREATE INDEX IF NOT EXISTS idx_knowledges_parse_status_started
-    ON knowledges (parse_status, processing_started_at);
+    ON knowledges (parse_status, processing_started_at)
+    WHERE parse_status IN ('processing', 'pending');
 
 CREATE TABLE IF NOT EXISTS sessions (
     id VARCHAR(36) PRIMARY KEY,

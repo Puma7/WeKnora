@@ -1251,10 +1251,12 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		concurrency = 1
 	}
 	var (
-		mu             sync.Mutex
-		indexInfoList  []*types.IndexInfo
-		touchedChunks  []*types.Chunk // chunks whose metadata was updated and should get QuestionsIndexedAt set after BatchIndex
-		processedCount int
+		mu                  sync.Mutex
+		indexInfoList       []*types.IndexInfo
+		touchedChunks       []*types.Chunk // chunks whose metadata was updated and should get QuestionsIndexedAt set after BatchIndex
+		processedCount      int
+		progressMu          sync.Mutex // guards lastWrittenProgress; held only across the in-memory check, NOT during the DB write
+		lastWrittenProgress int
 	)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrency)
@@ -1336,20 +1338,29 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 			}
 			processedCount++
 			localProgress := processedCount
-			// Heartbeat / progress every 50 processed items, written
-			// while still holding the lock so DB writes are serialized
-			// in increasing order — without the lock, two goroutines
-			// could write "100/N" before "50/N" lands and the UI would
-			// see progress jump backward.
+			mu.Unlock()
+
+			// Progress / heartbeat every 50 processed items. The DB
+			// writes happen OUTSIDE the worker mutex so a stalled DB
+			// can never deadlock the worker pool. progressMu protects
+			// only the in-memory "what's the latest value we've decided
+			// to write" check — also released before the DB call.
 			if localProgress%50 == 0 {
-				if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, localProgress, len(work)); err != nil {
-					logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", localProgress, err)
+				progressMu.Lock()
+				shouldWrite := localProgress > lastWrittenProgress
+				if shouldWrite {
+					lastWrittenProgress = localProgress
 				}
-				if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
-					logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", localProgress, err)
+				progressMu.Unlock()
+				if shouldWrite {
+					if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, localProgress, len(work)); err != nil {
+						logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", localProgress, err)
+					}
+					if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
+						logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", localProgress, err)
+					}
 				}
 			}
-			mu.Unlock()
 			return nil
 		})
 	}
@@ -1514,7 +1525,12 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 
 		// Same rationale as the non-manual path below: kill any stale
 		// task with the deterministic ID so our fresh enqueue wins.
-		killTaskByDeterministicID(ManualProcessTaskID(knowledgeID))
+		// If a worker is *currently* running the old task, abort —
+		// destroying state under a live worker corrupts the run.
+		if err := killTaskByDeterministicID(ManualProcessTaskID(knowledgeID)); err != nil {
+			logger.Warnf(ctx, "Reparse aborted: stale task is still active for %s: %v", knowledgeID, err)
+			return nil, werrors.NewBadRequestError("Knowledge wird gerade verarbeitet, bitte erneut versuchen")
+		}
 
 		existing.ParseStatus = "pending"
 		existing.EnableStatus = "disabled"
@@ -1540,10 +1556,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 	// same deterministic ID is still pending/scheduled/retrying, our
 	// fresh Enqueue would silently no-op via ErrTaskIDConflict and the
 	// stale task would run with a now-cleaned knowledge. Kill it first
-	// so the new Enqueue actually wins. Active (running) tasks can't be
-	// deleted; in that rare case the running task will finish first
-	// and our new Enqueue will follow.
-	killTaskByDeterministicID(DocProcessTaskID(knowledgeID))
+	// so the new Enqueue actually wins. Active (running) tasks CAN'T
+	// be deleted — destroying chunks/index under a live worker leads
+	// to data corruption, so we abort the reparse and tell the caller
+	// to retry once the worker finishes.
+	if err := killTaskByDeterministicID(DocProcessTaskID(knowledgeID)); err != nil {
+		logger.Warnf(ctx, "Reparse aborted: stale task is still active for %s: %v", knowledgeID, err)
+		return nil, werrors.NewBadRequestError("Knowledge wird gerade verarbeitet, bitte erneut versuchen")
+	}
 
 	// For non-manual knowledge, cleanup synchronously then enqueue document processing
 	logger.Infof(ctx, "Cleaning up existing resources for knowledge: %s", knowledgeID)
