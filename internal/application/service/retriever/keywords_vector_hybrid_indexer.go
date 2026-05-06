@@ -82,6 +82,8 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 		return nil
 	}
 
+	logger.Infof(ctx, "BatchIndex: starting (chunks=%d, retrievers=%v)", len(indexInfoList), retrieverTypes)
+
 	if slices.Contains(retrieverTypes, types.VectorRetrieverType) {
 		var contentList []string
 		for _, indexInfo := range indexInfoList {
@@ -163,6 +165,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) concurrentBatchSave(
 	embeddings [][]float32,
 	batchSize int,
 ) error {
+	totalBatches := len(chunks)
 	g, ctx := errgroup.WithContext(ctx)
 	for i, indexChunk := range chunks {
 		g.Go(func() error {
@@ -172,7 +175,11 @@ func (v *KeywordsVectorHybridRetrieveEngineService) concurrentBatchSave(
 				embeddingMap[indexInfo.SourceID] = embeddings[i*batchSize+j]
 			}
 			params["embedding"] = embeddingMap
-			return v.indexRepository.BatchSave(ctx, indexChunk, params)
+			if err := v.indexRepository.BatchSave(ctx, indexChunk, params); err != nil {
+				return err
+			}
+			logger.Infof(ctx, "BatchIndex: batch %d/%d saved (size=%d)", i+1, totalBatches, len(indexChunk))
+			return nil
 		})
 	}
 	return g.Wait()
@@ -186,6 +193,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) boundedConcurrentBatchSave(
 	batchSize int,
 	maxConcurrency int,
 ) error {
+	totalBatches := len(chunks)
 	g, ctx := errgroup.WithContext(ctx)
 	sem := make(chan struct{}, maxConcurrency)
 
@@ -204,7 +212,11 @@ func (v *KeywordsVectorHybridRetrieveEngineService) boundedConcurrentBatchSave(
 				embeddingMap[indexInfo.SourceID] = embeddings[i*batchSize+j]
 			}
 			params["embedding"] = embeddingMap
-			return v.indexRepository.BatchSave(ctx, indexChunk, params)
+			if err := v.indexRepository.BatchSave(ctx, indexChunk, params); err != nil {
+				return err
+			}
+			logger.Infof(ctx, "BatchIndex: batch %d/%d saved (size=%d)", i+1, totalBatches, len(indexChunk))
+			return nil
 		})
 	}
 	return g.Wait()
