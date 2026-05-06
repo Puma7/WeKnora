@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service"
@@ -30,6 +31,21 @@ type AsynqTaskParams struct {
 	WikiIngest           interfaces.TaskHandler `name:"wikiIngest"`
 }
 
+// envIntDefault reads an integer from an env var, falling back to def when
+// unset, empty, or unparseable. Negative values also fall back to keep
+// callers from accidentally configuring poison values.
+func envIntDefault(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed < 0 {
+		return def
+	}
+	return parsed
+}
+
 func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
 	db := 0
 	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
@@ -37,12 +53,19 @@ func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
 			db = parsed
 		}
 	}
+	// Default timeouts were 100ms read / 200ms write — too tight under load:
+	// a brief Redis stall (GC pause, network hiccup, large pending list scan)
+	// surfaces as spurious task fetch failures and asynq heartbeat misses.
+	// 3s gives ample headroom while staying well below any reasonable task
+	// timeout. Override via WEKNORA_REDIS_*_TIMEOUT_MS if needed.
+	readTimeoutMs := envIntDefault("WEKNORA_REDIS_READ_TIMEOUT_MS", 3000)
+	writeTimeoutMs := envIntDefault("WEKNORA_REDIS_WRITE_TIMEOUT_MS", 3000)
 	opt := &asynq.RedisClientOpt{
 		Addr:         os.Getenv("REDIS_ADDR"),
 		Username:     os.Getenv("REDIS_USERNAME"),
 		Password:     os.Getenv("REDIS_PASSWORD"),
-		ReadTimeout:  100 * time.Millisecond,
-		WriteTimeout: 200 * time.Millisecond,
+		ReadTimeout:  time.Duration(readTimeoutMs) * time.Millisecond,
+		WriteTimeout: time.Duration(writeTimeoutMs) * time.Millisecond,
 		DB:           db,
 	}
 	return opt
@@ -83,9 +106,20 @@ func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 
 func NewAsynqServer() *asynq.Server {
 	opt := getAsynqRedisClientOpt()
+	// Concurrency is the *total* number of worker goroutines across all
+	// queues; the priority weights below only govern dispatch ratio. The
+	// asynq library default is 10. For bulk-ingest workloads (thousands of
+	// documents) raise this to 32+ via WEKNORA_ASYNQ_CONCURRENCY so that a
+	// few long-running tasks (Wiki ingest, Question Generation) don't
+	// monopolize all worker slots and starve fresh document processing.
+	concurrency := envIntDefault("WEKNORA_ASYNQ_CONCURRENCY", 10)
+	if concurrency == 0 {
+		concurrency = 10
+	}
 	srv := asynq.NewServer(
 		opt,
 		asynq.Config{
+			Concurrency: concurrency,
 			Queues: map[string]int{
 				"critical": 6, // Highest priority queue
 				"default":  3, // Default priority queue

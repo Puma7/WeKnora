@@ -262,7 +262,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue document process task: %v", err)
@@ -436,7 +436,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue URL process task: %v", err)
@@ -659,7 +659,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"))
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue file URL process task: %v", err)
@@ -879,7 +879,7 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 			return knowledge, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue passage process task: %v", err)
@@ -1018,7 +1018,7 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 		return fmt.Errorf("failed to marshal manual process payload: %w", err)
 	}
 
-	task := asynq.NewTask(types.TypeManualProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+	task := asynq.NewTask(types.TypeManualProcess, payloadBytes, docProcessOpts()...)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
 		return fmt.Errorf("failed to enqueue manual process task: %w", err)

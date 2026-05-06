@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,38 @@ func getMaxMessageSize() int {
 		}
 	}
 	return 50 * 1024 * 1024
+}
+
+// docReaderReadTimeout caps a single Read RPC. DocReader normally returns
+// in seconds for typical files, but a malformed PDF or a parser engine
+// stuck on an external dependency can hang the connection indefinitely.
+// Without this cap, every parse attempt holds an asynq worker for the
+// full task timeout. 5 minutes is generous for any document up to the
+// configured MAX_FILE_SIZE_MB.
+func docReaderReadTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("WEKNORA_DOCREADER_TIMEOUT_MS"))
+	if v == "" {
+		return 5 * time.Minute
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// docReaderListEnginesTimeout is much shorter than Read since it only
+// asks the service which engines are available — should be sub-second.
+func docReaderListEnginesTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("WEKNORA_DOCREADER_LIST_TIMEOUT_MS"))
+	if v == "" {
+		return 10 * time.Second
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		return 10 * time.Second
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // GRPCDocumentReader implements DocumentReader over gRPC.
@@ -120,7 +153,9 @@ func (p *GRPCDocumentReader) Read(ctx context.Context, req *types.ReadRequest) (
 		},
 	}
 
-	resp, err := client.Read(ctx, protoReq)
+	callCtx, cancel := context.WithTimeout(ctx, docReaderReadTimeout())
+	defer cancel()
+	resp, err := client.Read(callCtx, protoReq)
 	if err != nil {
 		return nil, fmt.Errorf("gRPC Read failed: %w", err)
 	}
@@ -135,7 +170,9 @@ func (p *GRPCDocumentReader) ListEngines(ctx context.Context, overrides map[stri
 		return nil, errNotConnected
 	}
 
-	resp, err := client.ListEngines(ctx, &proto.ListEnginesRequest{ConfigOverrides: overrides})
+	callCtx, cancel := context.WithTimeout(ctx, docReaderListEnginesTimeout())
+	defer cancel()
+	resp, err := client.ListEngines(callCtx, &proto.ListEnginesRequest{ConfigOverrides: overrides})
 	if err != nil {
 		return nil, fmt.Errorf("gRPC ListEngines failed: %w", err)
 	}

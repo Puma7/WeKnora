@@ -587,7 +587,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		langfuse.InjectTracing(ctx, &postProcessPayload)
 		payloadBytes, err := json.Marshal(postProcessPayload)
 		if err == nil {
-			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, postProcessOpts()...)
 			if _, err := s.task.Enqueue(task); err != nil {
 				logger.Errorf(ctx, "Failed to enqueue knowledge post process task: %v", err)
 			} else {
@@ -712,7 +712,9 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 		"language": types.LanguageNameFromContext(ctx),
 	})
 	thinking := false
-	summary, err := summaryModel.Chat(ctx, []chat.Message{
+	callCtx, cancel := context.WithTimeout(ctx, llmCallTimeout())
+	defer cancel()
+	summary, err := summaryModel.Chat(callCtx, []chat.Message{
 		{
 			Role:    "system",
 			Content: summaryPrompt,
@@ -1278,7 +1280,9 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 	})
 
 	thinking := false
-	response, err := chatModel.Chat(ctx, []chat.Message{
+	callCtx, cancel := context.WithTimeout(ctx, llmCallTimeout())
+	defer cancel()
+	response, err := chatModel.Chat(callCtx, []chat.Message{
 		{
 			Role:    "user",
 			Content: prompt,
@@ -1432,7 +1436,7 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue reparse task: %v", err)
@@ -1485,7 +1489,7 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue file URL reparse task: %v", err)
@@ -1531,7 +1535,7 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, docProcessOpts()...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue URL reparse task: %v", err)
@@ -2409,7 +2413,7 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 			continue
 		}
 
-		task := asynq.NewTask(types.TypeImageMultimodal, payloadBytes)
+		task := asynq.NewTask(types.TypeImageMultimodal, payloadBytes, imageMultimodalOpts()...)
 		if _, err := s.task.Enqueue(task); err != nil {
 			logger.Warnf(ctx, "Failed to enqueue image multimodal task for %s: %v", img.ServingURL, err)
 		} else {
