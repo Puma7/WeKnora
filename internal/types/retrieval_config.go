@@ -77,6 +77,17 @@ func (c *RetrievalConfig) GetEffectiveRerankThreshold() float64 {
 	return c.RerankThreshold
 }
 
+// GetEffectiveRerankModelID returns the rerank model ID to use for retrieval.
+// Falls back to the tenant-level default model when no per-config override is
+// set. Returns "" when neither a config value nor a tenant default exists —
+// callers must keep their graceful-skip behaviour for that case.
+func (c *RetrievalConfig) GetEffectiveRerankModelID(tenantDefaultID string) string {
+	if c != nil && c.RerankModelID != "" {
+		return c.RerankModelID
+	}
+	return tenantDefaultID
+}
+
 // GetEffectiveRRFK returns the RRF smoothing constant with a fallback default.
 func (c *RetrievalConfig) GetEffectiveRRFK() int {
 	if c == nil || c.RRFK <= 0 {

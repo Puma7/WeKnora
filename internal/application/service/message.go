@@ -614,13 +614,30 @@ func (s *messageService) vectorSearchViaKB(ctx context.Context, params *types.Me
 // rerankResults applies rerank model to search results if configured.
 // Returns reranked + filtered results, or original results if rerank is unavailable.
 func (s *messageService) rerankResults(ctx context.Context, rc *types.RetrievalConfig, query string, results []*types.SearchResult) []*types.SearchResult {
-	if rc == nil || rc.RerankModelID == "" || len(results) == 0 {
+	if len(results) == 0 {
 		return results
 	}
 
-	reranker, err := s.modelService.GetRerankModel(ctx, rc.RerankModelID)
+	// Resolve effective rerank model ID: KB/config override wins; otherwise
+	// fall back to the tenant-level default model. A DB error on the default
+	// lookup is non-fatal — we just behave as if no default exists and skip
+	// reranking, matching the pre-fallback behaviour.
+	var defaultID string
+	if tenantID, ok := types.TenantIDFromContext(ctx); ok {
+		if id, err := s.modelService.GetTenantDefaultRerankModelID(ctx, uint(tenantID)); err != nil {
+			logger.Warnf(ctx, "Failed to look up tenant default rerank model: %v", err)
+		} else {
+			defaultID = id
+		}
+	}
+	modelID := rc.GetEffectiveRerankModelID(defaultID)
+	if modelID == "" {
+		return results
+	}
+
+	reranker, err := s.modelService.GetRerankModel(ctx, modelID)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to get rerank model %s, skipping rerank: %v", rc.RerankModelID, err)
+		logger.Warnf(ctx, "Failed to get rerank model %s, skipping rerank: %v", modelID, err)
 		return results
 	}
 

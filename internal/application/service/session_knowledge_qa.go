@@ -637,10 +637,20 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
 		return nil, err
 	}
 
-	// Use rerank model from RetrievalConfig if set, otherwise auto-select the first available
-	if rc != nil && rc.RerankModelID != "" {
-		chatManage.RerankModelID = rc.RerankModelID
-	} else {
+	// Resolve rerank model in order: KB/RetrievalConfig override → tenant
+	// default (Model.IsDefault on a rerank model) → first available rerank
+	// model. The tenant-default tier brings reranker behaviour in line with
+	// embedding/LLM, which already honour Model.IsDefault.
+	var tenantDefaultRerankID string
+	if tenantID, ok := types.TenantIDFromContext(ctx); ok {
+		if id, lookupErr := s.modelService.GetTenantDefaultRerankModelID(ctx, uint(tenantID)); lookupErr != nil {
+			logger.Warnf(ctx, "Failed to look up tenant default rerank model: %v", lookupErr)
+		} else {
+			tenantDefaultRerankID = id
+		}
+	}
+	chatManage.RerankModelID = rc.GetEffectiveRerankModelID(tenantDefaultRerankID)
+	if chatManage.RerankModelID == "" {
 		for _, model := range models {
 			if model == nil {
 				continue
