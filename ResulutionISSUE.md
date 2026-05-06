@@ -1,50 +1,50 @@
 # WeKnora — Resolution Plan
 
-> Reaktion auf `ISSUE.md` vom 2026-05-06.
-> Rolle: **Resolution Engineer** — minimal-invasive Chirurgie, keine Refactorings, keine Symptom-Doctoring.
-> Status: **Nur Lösungs-Vorschlag.** Patches sind als Diff-Skizzen formuliert; keine Quelldateien dieses Commits werden geändert.
+> Response to `ISSUE.md` from 2026-05-06.
+> Role: **Resolution Engineer** — minimal-invasive surgery, no refactors, no symptom doctoring.
+> Status: **Proposal only.** Patches are formulated as diff sketches; no source files in this commit are modified.
 >
-> Lesehinweis:
-> - `// GEÄNDERT` = Zeile ersetzt
-> - `// NEU` = Zeile hinzugefügt
-> - `// ENTFERNEN` = Zeile entfällt
+> Reading guide:
+> - `// CHANGED` = line replaced
+> - `// NEW` = line added
+> - `// REMOVE` = line dropped
 >
-> Aufbau: erst alle **Critical**, dann alle **High**, dann **Medium** (kürzer). Innerhalb identisch nach Bereichen wie in `ISSUE.md`.
+> Layout: all **Critical** first, then all **High**, then **Medium** (shorter). Within each, grouped by area like in `ISSUE.md`.
 
 ---
 
 ## CRITICAL FIXES
 
-### 🔴 Problem 1: CORS akzeptiert `*` zusammen mit `AllowCredentials: true`
-🔍 **Ursache:** Die Wildcard-Origin in Kombination mit Credentials ist laut CORS-Spezifikation ungültig; sie signalisiert eine fehlende Allowlist statt einer bewussten Sicherheits­entscheidung.
-✅ **Fix-Strategie:** Allowlist aus `ALLOWED_ORIGINS`-Env (Komma-Liste) lesen, Fallback auf leere Liste. `AllowOriginFunc` nutzen, damit Wildcards & Subdomain-Patterns sauber trennbar bleiben. Kein Refactoring der restlichen Middleware-Kette.
-💻 **Code-Änderung** — `internal/router/router.go:74-87`
+### 🔴 Problem 1: CORS accepts `*` together with `AllowCredentials: true`
+🔍 **Root cause:** The wildcard origin combined with credentials is invalid per the CORS spec; it signals a missing allowlist instead of a deliberate security choice.
+✅ **Fix strategy:** Read allowlist from `ALLOWED_ORIGINS` env (comma list), default to empty list. Use `AllowOriginFunc` so wildcards & subdomain patterns stay cleanly separable. No refactor of the rest of the middleware chain.
+💻 **Code change** — `internal/router/router.go:74-87`
 ```go
-// GEÄNDERT: bezogene Imports oben in der Datei sicherstellen
+// CHANGED: ensure related imports at the top of the file
 import (
-    "os"      // NEU
-    "strings" // NEU
-    // ... bisherige Imports unverändert
+    "os"      // NEW
+    "strings" // NEW
+    // ... existing imports unchanged
 )
 
 func NewRouter(params RouterParams) *gin.Engine {
     r := gin.New()
     r.ContextWithFallback = true
 
-    // GEÄNDERT: Allowlist statt "*" + AllowCredentials
-    allowed := strings.Split(strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")), ",") // NEU
-    for i, o := range allowed {                                                    // NEU
-        allowed[i] = strings.TrimSpace(o)                                          // NEU
-    }                                                                              // NEU
+    // CHANGED: allowlist instead of "*" + AllowCredentials
+    allowed := strings.Split(strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")), ",") // NEW
+    for i, o := range allowed {                                                    // NEW
+        allowed[i] = strings.TrimSpace(o)                                          // NEW
+    }                                                                              // NEW
     r.Use(cors.New(cors.Config{
-        AllowOriginFunc: func(origin string) bool { // NEU
-            for _, o := range allowed {              // NEU
-                if o != "" && o == origin {          // NEU
-                    return true                      // NEU
-                }                                    // NEU
-            }                                        // NEU
-            return false                             // NEU
-        },                                           // NEU
+        AllowOriginFunc: func(origin string) bool { // NEW
+            for _, o := range allowed {              // NEW
+                if o != "" && o == origin {          // NEW
+                    return true                      // NEW
+                }                                    // NEW
+            }                                        // NEW
+            return false                             // NEW
+        },                                           // NEW
         AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
         AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Request-ID"},
         ExposeHeaders:    []string{"Content-Length", "Access-Control-Allow-Origin"},
@@ -54,32 +54,32 @@ func NewRouter(params RouterParams) *gin.Engine {
     // ...
 }
 ```
-🛡️ **No-Regression-Check:** Bei leerem `ALLOWED_ORIGINS` werden alle Browser-Cross-Origin-Requests abgelehnt — Same-Origin-Aufrufe (Vite-Proxy in Dev, nginx-Reverse-Proxy in Prod) sind nicht betroffen. Dokumentations-Hinweis im `.env.example` ist Sprint-2-Aufgabe.
+🛡️ **No-regression check:** With empty `ALLOWED_ORIGINS`, all browser cross-origin requests are rejected — same-origin calls (Vite proxy in dev, nginx reverse proxy in prod) are not affected. Documentation hint in `.env.example` is a Sprint-2 task.
 
 ---
 
-### 🔴 Problem 2: Slack-Webhook ohne Signing-Secret = Auth-Bypass
-🔍 **Ursache:** Der Early-Return bei leerem `signingSecret` macht aus einer Fehlkonfiguration einen Auth-Bypass statt eines Hard-Fail.
-✅ **Fix-Strategie:** Bei leerem Secret Fehler werfen statt `nil`. So fällt der Webhook-Endpoint bei Fehl­konfiguration sicher um, statt unsignierte Requests zu akzeptieren. Kein anderes Verhalten verändert.
-💻 **Code-Änderung** — `internal/im/slack/adapter.go:100-103`
+### 🔴 Problem 2: Slack webhook without signing secret = auth bypass
+🔍 **Root cause:** The early return on empty `signingSecret` turns a misconfiguration into an auth bypass instead of a hard fail.
+✅ **Fix strategy:** Return an error on empty secret instead of `nil`. The webhook endpoint then fails safely on misconfiguration instead of accepting unsigned requests. Nothing else changes.
+💻 **Code change** — `internal/im/slack/adapter.go:100-103`
 ```go
 func (a *Adapter) VerifyCallback(c *gin.Context) error {
     if a.signingSecret == "" {
-        return fmt.Errorf("slack signing secret not configured") // GEÄNDERT: vorher return nil
+        return fmt.Errorf("slack signing secret not configured") // CHANGED: was return nil
     }
-    // restlicher Body unverändert
+    // remaining body unchanged
 }
 ```
-🛡️ **No-Regression-Check:** Adapter-Konstruktoren, die Slack ohne Secret instanziieren, bekommen jetzt eine harte Fehlermeldung beim ersten Webhook-Hit — gewünscht. Tests, die `signingSecret=""` simulieren, müssen aktualisiert werden.
+🛡️ **No-regression check:** Adapter constructors that instantiate Slack without a secret will now hit a hard error on the first webhook call — desired. Tests that simulate `signingSecret=""` need updating.
 
 ---
 
-### 🔴 Problem 3: Hardcoded Default-Passwörter in `docker-compose.yml`
-🔍 **Ursache:** Compose-Var-Defaults (`${VAR:-default}`) machen aus „Variable nicht gesetzt" eine implizite Wahl bekannter Default-Credentials.
-✅ **Fix-Strategie:** Default-Werte entfernen, sodass Compose mit klarer Fehlermeldung abbricht („variable is not set"). Anwender wird gezwungen, im `.env` echte Werte zu setzen.
-💻 **Code-Änderung** — `docker-compose.yml:128, 237-238, 437-438, 522-523, 525`, `.env.example:211`
+### 🔴 Problem 3: Hardcoded default passwords in `docker-compose.yml`
+🔍 **Root cause:** Compose var defaults (`${VAR:-default}`) turn "variable not set" into an implicit choice of well-known default credentials.
+✅ **Fix strategy:** Remove the default values so compose aborts with a clear error ("variable is not set"). The operator is forced to set real values in `.env`.
+💻 **Code change** — `docker-compose.yml:128, 237-238, 437-438, 522-523, 525`, `.env.example:211`
 ```yaml
-# GEÄNDERT: docker-compose.yml — Default-Werte entfernt
+# CHANGED: docker-compose.yml — defaults removed
 - NEO4J_PASSWORD=${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
 - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
 
@@ -93,33 +93,33 @@ SALT: ${LANGFUSE_SALT:?LANGFUSE_SALT must be set (openssl rand -base64 32)}
 NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?LANGFUSE_NEXTAUTH_SECRET must be set}
 ```
 ```bash
-# GEÄNDERT: .env.example:211 — Hinweis statt verwendbarer Default-Wert
+# CHANGED: .env.example:211 — instruction instead of usable default
 JWT_SECRET= # REQUIRED: openssl rand -hex 32
 ```
-🛡️ **No-Regression-Check:** `.env.example` muss synchron eine deutliche Anweisung haben (siehe Problem 5). Bestehende `.env` mit gesetzten Werten sind unberührt.
+🛡️ **No-regression check:** `.env.example` must carry a clear instruction in sync (see Problem 5). Existing `.env` files with values set are unaffected.
 
 ---
 
-### 🔴 Problem 4: Langfuse `ENCRYPTION_KEY` defaultet auf 64 × `0`
-🔍 **Ursache:** Eine all-zeros-Konstante als Default-Schlüssel hat Null-Entropie und ist trivial brute-forcebar.
-✅ **Fix-Strategie:** Default entfernen — Compose schlägt mit Fail-Fast fehl. Kein Implementierungs­aufwand, nur Default-Stripping.
-💻 **Code-Änderung** — `docker-compose.yml:523`, `docker-compose.dev.yml:333`
+### 🔴 Problem 4: Langfuse `ENCRYPTION_KEY` defaults to 64 × `0`
+🔍 **Root cause:** An all-zeros constant as a default key has zero entropy and is trivially brute-forceable.
+✅ **Fix strategy:** Remove the default — compose fails fast. No implementation work, just default stripping.
+💻 **Code change** — `docker-compose.yml:523`, `docker-compose.dev.yml:333`
 ```yaml
-# GEÄNDERT
+# CHANGED
 ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY must be set (openssl rand -hex 32)}
 ```
-🛡️ **No-Regression-Check:** Bestehende Installationen, die den Default benutzten, sind ohnehin sicherheitstechnisch defekt — sie *müssen* einmalig den Schlüssel rotieren. Dokumentation in CHANGELOG verlinken.
+🛡️ **No-regression check:** Existing installations that used the default are already broken security-wise — they *must* rotate the key once. Reference in CHANGELOG.
 
 ---
 
-### 🔴 Problem 5: `curl … | sh` für `uv`/Ollama im Build und im Setup-Skript
-🔍 **Ursache:** Die Pipe entzieht der Distribution jede Manipulationsprüfung — Inhaltliche Änderung beim Upstream landet ungefiltert im Image.
-✅ **Fix-Strategie:** Konkreten Release-Tag pinnen + SHA-256-Checksum in Dockerfile/Skript verifizieren. Falls `uv` direkt in `pip install` gewünscht ist, alternativ `pip install --require-hashes`. Hier minimal-invasive Variante mit Checksum.
-💻 **Code-Änderung** — `docker/Dockerfile.app:79`
+### 🔴 Problem 5: `curl … | sh` for `uv`/Ollama in build & setup script
+🔍 **Root cause:** The pipe strips any tamper-detection from the distribution — content changes upstream land unfiltered in the image.
+✅ **Fix strategy:** Pin a concrete release tag and verify SHA-256 checksum in the Dockerfile/script. If `uv` directly via `pip install` is desired, alternatively `pip install --require-hashes`. Minimal-invasive variant with checksum here.
+💻 **Code change** — `docker/Dockerfile.app:79`
 ```dockerfile
-# GEÄNDERT: Tag-Pin + Checksum-Verifikation
+# CHANGED: tag pin + checksum verification
 ARG UV_VERSION=0.5.14
-ARG UV_INSTALL_SHA256=<echte-sha256-vom-Release-eintragen>
+ARG UV_INSTALL_SHA256=<actual-sha256-from-release>
 RUN curl -LsSf -o /tmp/uv-install.sh \
         "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-installer.sh" && \
     echo "${UV_INSTALL_SHA256}  /tmp/uv-install.sh" | sha256sum -c - && \
@@ -127,70 +127,70 @@ RUN curl -LsSf -o /tmp/uv-install.sh \
         sh /tmp/uv-install.sh && \
     rm -f /tmp/uv-install.sh
 ```
-💻 **Code-Änderung** — `scripts/start_all.sh:142`
+💻 **Code change** — `scripts/start_all.sh:142`
 ```bash
-# GEÄNDERT
-OLLAMA_VERSION="0.4.4"   # NEU
-OLLAMA_SHA256="<echte-sha256-vom-Release>"  # NEU
+# CHANGED
+OLLAMA_VERSION="0.4.4"   # NEW
+OLLAMA_SHA256="<actual-sha256-from-release>"  # NEW
 curl -fsSL -o /tmp/ollama-install.sh \
-    "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-install.sh" # GEÄNDERT
-echo "${OLLAMA_SHA256}  /tmp/ollama-install.sh" | sha256sum -c -                              # NEU
-sh /tmp/ollama-install.sh                                                                     # NEU
-rm -f /tmp/ollama-install.sh                                                                  # NEU
+    "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-install.sh" # CHANGED
+echo "${OLLAMA_SHA256}  /tmp/ollama-install.sh" | sha256sum -c -                              # NEW
+sh /tmp/ollama-install.sh                                                                     # NEW
+rm -f /tmp/ollama-install.sh                                                                  # NEW
 ```
-🛡️ **No-Regression-Check:** Bei Upstream-Update: Hash-Bumping erforderlich (gewolltes Verhalten — explizite Freigabe). Die `ARG`-Werte können in CI als Build-Args überschrieben werden.
+🛡️ **No-regression check:** On upstream update: hash bump required (intentional — explicit approval). The `ARG` values can be overridden as build-args in CI.
 
 ---
 
-### 🔴 Problem 6: JWT/Refresh-Token in `localStorage`
-🔍 **Ursache:** `localStorage` ist via XSS lesbar und persistiert Tokens länger als nötig — die Backend-Session sollte als HTTP-only-Cookie gesetzt werden.
-✅ **Fix-Strategie:** Migration ist eine größere Backend/Frontend-Koordination. Als minimal-invasiver **Zwischenfix** speichern wir Tokens in `sessionStorage` (geht beim Tab-Schluss verloren, nicht permanent), und ergänzen XSS-Reduktion über `dompurify`-Audit (Problem 27). Vollumzug auf HTTP-only-Cookies wird Sprint-Ticket.
-💻 **Code-Änderung** — `frontend/src/stores/auth.ts:75-83, 144-152, 162-167`
+### 🔴 Problem 6: JWT/refresh token in `localStorage`
+🔍 **Root cause:** `localStorage` is readable via XSS and persists tokens longer than necessary — the backend session should be set as an HTTP-only cookie.
+✅ **Fix strategy:** Migration is a larger backend/frontend coordination. As a minimal-invasive **interim fix**, store tokens in `sessionStorage` (cleared on tab close, not permanent) and complement with a XSS reduction via `dompurify` audit (Problem 27). Full move to HTTP-only cookies becomes a sprint ticket.
+💻 **Code change** — `frontend/src/stores/auth.ts:75-83, 144-152, 162-167`
 ```ts
-// GEÄNDERT: localStorage → sessionStorage für Auth-Tokens
+// CHANGED: localStorage → sessionStorage for auth tokens
 const setToken = (tokenValue: string) => {
   token.value = tokenValue
-  sessionStorage.setItem('weknora_token', tokenValue)        // GEÄNDERT
+  sessionStorage.setItem('weknora_token', tokenValue)        // CHANGED
 }
 
 const setRefreshToken = (refreshTokenValue: string) => {
   refreshToken.value = refreshTokenValue
-  sessionStorage.setItem('weknora_refresh_token', refreshTokenValue) // GEÄNDERT
+  sessionStorage.setItem('weknora_refresh_token', refreshTokenValue) // CHANGED
 }
 
 // in logout():
-sessionStorage.removeItem('weknora_token')          // GEÄNDERT
-sessionStorage.removeItem('weknora_refresh_token')  // GEÄNDERT
+sessionStorage.removeItem('weknora_token')          // CHANGED
+sessionStorage.removeItem('weknora_refresh_token')  // CHANGED
 
 // in initFromStorage():
-const storedToken = sessionStorage.getItem('weknora_token')               // GEÄNDERT
-const storedRefreshToken = sessionStorage.getItem('weknora_refresh_token') // GEÄNDERT
+const storedToken = sessionStorage.getItem('weknora_token')               // CHANGED
+const storedRefreshToken = sessionStorage.getItem('weknora_refresh_token') // CHANGED
 ```
-💻 **Code-Änderung** — `frontend/src/utils/request.ts:32, 41, 134, 146-147`
+💻 **Code change** — `frontend/src/utils/request.ts:32, 41, 134, 146-147`
 ```ts
-// GEÄNDERT: alle 4 Stellen
-const token = sessionStorage.getItem('weknora_token')               // GEÄNDERT
-const refreshToken = sessionStorage.getItem('weknora_refresh_token') // GEÄNDERT
-sessionStorage.setItem('weknora_token', newToken)                    // GEÄNDERT
-sessionStorage.setItem('weknora_refresh_token', newRefreshToken)     // GEÄNDERT
+// CHANGED: all 4 locations
+const token = sessionStorage.getItem('weknora_token')               // CHANGED
+const refreshToken = sessionStorage.getItem('weknora_refresh_token') // CHANGED
+sessionStorage.setItem('weknora_token', newToken)                    // CHANGED
+sessionStorage.setItem('weknora_refresh_token', newRefreshToken)     // CHANGED
 ```
-🛡️ **No-Regression-Check:** Nutzer, die heute einen offenen Tab haben, müssen sich nach dem Deploy einmal neu anmelden. Persistenz-Wunsch („remember me") muss als Folge-Ticket über Refresh-Token im HTTP-only-Cookie gelöst werden.
+🛡️ **No-regression check:** Users with an open tab today will have to log in once after deploy. "Remember me" persistence wish must be solved as a follow-up ticket via refresh token in HTTP-only cookie.
 
 ---
 
-### 🔴 Problem 7: `asyncio.run()` aus synchronem Library-Code
-🔍 **Ursache:** `asyncio.run()` darf nicht aus einer Funktion aufgerufen werden, die selbst von einem laufenden Event-Loop erreicht wird — sonst `RuntimeError: asyncio.run() cannot be called from a running event loop`.
-✅ **Fix-Strategie:** Statt einen neuen Loop pro Aufruf zu erstellen, einen dedizierten Background-Loop in einem eigenen Thread halten und Tasks per `run_coroutine_threadsafe` einreihen. Minimal-invasiv: lokaler Singleton-Helper im Modul, Aufrufer-Signatur unverändert.
-💻 **Code-Änderung** — `docreader/parser/web_parser.py:1-15, 95-101`
+### 🔴 Problem 7: `asyncio.run()` from synchronous library code
+🔍 **Root cause:** `asyncio.run()` must not be called from a function reachable by a running event loop — otherwise `RuntimeError: asyncio.run() cannot be called from a running event loop`.
+✅ **Fix strategy:** Instead of creating a new loop per call, keep a dedicated background loop in its own thread and submit tasks via `run_coroutine_threadsafe`. Minimal-invasive: local singleton helper in the module, caller signature unchanged.
+💻 **Code change** — `docreader/parser/web_parser.py:1-15, 95-101`
 ```python
 import asyncio
-import threading                    # NEU
-# ... bisherige Imports
+import threading                    # NEW
+# ... existing imports
 
-_loop = None                        # NEU
-_loop_lock = threading.Lock()       # NEU
+_loop = None                        # NEW
+_loop_lock = threading.Lock()       # NEW
 
-def _get_loop():                    # NEU
+def _get_loop():                    # NEW
     global _loop
     with _loop_lock:
         if _loop is None or _loop.is_closed():
@@ -203,57 +203,57 @@ def _get_loop():                    # NEU
 def parse_into_text(self, content: bytes) -> Document:
     url = endecode.decode_bytes(content)
     logger.info(f"Scraping web page: {url}")
-    # GEÄNDERT: asyncio.run() durch run_coroutine_threadsafe ersetzt
+    # CHANGED: asyncio.run() replaced with run_coroutine_threadsafe
     fut = asyncio.run_coroutine_threadsafe(self.scrape(url), _get_loop())
-    chtml = fut.result(timeout=60)   # GEÄNDERT: explizites Timeout
-    # ... unverändert
+    chtml = fut.result(timeout=60)   # CHANGED: explicit timeout
+    # ... unchanged
 ```
-🛡️ **No-Regression-Check:** Bei mehreren parallelen Aufrufen werden alle Coroutinen im selben Loop gemultiplext (Standard-asyncio-Verhalten). `fut.result(timeout=60)` schützt zusätzlich vor Hängern.
+🛡️ **No-regression check:** With multiple parallel calls, all coroutines are multiplexed on the same loop (standard asyncio behaviour). `fut.result(timeout=60)` adds protection against hangs.
 
 ---
 
-### 🔴 Problem 8: Mutable Default-Argumente in `_try_find_executable_path`
-🔍 **Ursache:** Python evaluiert Default-Argumente einmal beim `def`; ein `[]` als Default wird zwischen allen Aufrufen geteilt und durch `paths.extend(possible_path)` indirekt mutiert.
-✅ **Fix-Strategie:** `None` als Default, Liste innerhalb der Funktion materialisieren — Standard-Idiom, kein Verhaltens-Wechsel an Aufrufstellen.
-💻 **Code-Änderung** — `docreader/parser/doc_parser.py:231-249`
+### 🔴 Problem 8: Mutable default arguments in `_try_find_executable_path`
+🔍 **Root cause:** Python evaluates default arguments once at `def` time; an `[]` default is shared across all calls and indirectly mutated through `paths.extend(possible_path)`.
+✅ **Fix strategy:** `None` as default, materialize the list inside the function — standard idiom, no behaviour change at call sites.
+💻 **Code change** — `docreader/parser/doc_parser.py:231-249`
 ```python
 def _try_find_executable_path(
     self,
     executable_name: str,
-    possible_path: Optional[List[str]] = None,        # GEÄNDERT
-    environment_variable: Optional[List[str]] = None, # GEÄNDERT
+    possible_path: Optional[List[str]] = None,        # CHANGED
+    environment_variable: Optional[List[str]] = None, # CHANGED
 ) -> Optional[str]:
     """Find executable path …"""
-    possible_path = possible_path or []           # NEU
-    environment_variable = environment_variable or []  # NEU
+    possible_path = possible_path or []           # NEW
+    environment_variable = environment_variable or []  # NEW
     paths: List[str] = []
     paths.extend(possible_path)
     paths.extend(os.environ.get(env_var, "") for env_var in environment_variable)
     paths = list(set(paths))
-    # ... Rest unverändert
+    # ... rest unchanged
 ```
-🛡️ **No-Regression-Check:** Alle Call-Sites, die explizit `possible_path=[…]` übergeben, funktionieren unverändert. Aufrufe ohne Argument bekommen jetzt frische Listen pro Call (gewünschtes Verhalten).
+🛡️ **No-regression check:** All call sites that explicitly pass `possible_path=[…]` work unchanged. Calls without arguments now get fresh lists per call (desired behaviour).
 
 ---
 
-### 🔴 Problem 9: Keine `resources.limits` in irgendeinem Compose-Service
-🔍 **Ursache:** Ohne harte Memory/CPU-Limits kann ein einzelner Container den Host-Kernel in OOM kippen.
-✅ **Fix-Strategie:** Konservative Default-Limits über `deploy.resources`-Block. Compose nutzt diese Limits nur mit `docker compose --compatibility` oder Swarm; in reinem Compose-Up wirken die `mem_limit`/`cpus`-Top-Level-Felder. Beide setzen, damit beide Pfade abgesichert sind.
-💻 **Code-Änderung** — Beispiel `docker-compose.yml:30-50` (App), Pattern auf alle Services anwenden:
+### 🔴 Problem 9: No `resources.limits` on any compose service
+🔍 **Root cause:** Without hard memory/CPU limits, a single container can OOM-kill the host kernel.
+✅ **Fix strategy:** Conservative default limits via `deploy.resources` block. Compose only honours these with `docker compose --compatibility` or Swarm; in plain compose-up, the top-level `mem_limit`/`cpus` fields take effect. Set both so both paths are covered.
+💻 **Code change** — Example `docker-compose.yml:30-50` (app), apply pattern to all services:
 ```yaml
   app:
     image: wechatopenai/weknora-app:${WEKNORA_VERSION:-latest}
     container_name: WeKnora-app
-    # ... bestehende Felder
-    mem_limit: 4g                # NEU
-    cpus: 2.0                    # NEU
-    deploy:                       # NEU
-      resources:                  # NEU
-        limits:                   # NEU
-          memory: 4g              # NEU
-          cpus: "2.0"             # NEU
+    # ... existing fields
+    mem_limit: 4g                # NEW
+    cpus: 2.0                    # NEW
+    deploy:                       # NEW
+      resources:                  # NEW
+        limits:                   # NEW
+          memory: 4g              # NEW
+          cpus: "2.0"             # NEW
 ```
-Empfohlene Limits (Startwerte, je nach Workload zu tunen):
+Recommended limits (starting points, tune to workload):
 - `app`, `docreader`: 4 GiB / 2 CPU
 - `postgres`: 2 GiB / 1 CPU
 - `redis`: 512 MiB / 0.5 CPU
@@ -264,150 +264,150 @@ Empfohlene Limits (Startwerte, je nach Workload zu tunen):
 - `clickhouse`: 4 GiB / 2 CPU
 - `frontend` (nginx): 256 MiB / 0.25 CPU
 
-🛡️ **No-Regression-Check:** Werte ggf. in Test-Umgebung mit Last-Tests verifizieren; ein zu enges Limit erzeugt OOM-Restarts statt Host-Crash — gewünschtes Verhalten.
+🛡️ **No-regression check:** Verify values in a load-test environment; a too-tight limit produces OOM restarts instead of host crashes — desired behaviour.
 
 ---
 
-### 🔴 Problem 10: SQLite-Tabellennamen via `fmt.Sprintf` in Queries
-🔍 **Ursache:** `fmt.Sprintf` interpoliert die Tabelle direkt in den SQL-String; obwohl der Wert intern aus `vecTableName(dim)` stammt, etabliert das Pattern Präzedenz für spätere User-Inputs.
-✅ **Fix-Strategie:** Tabelennamen weiter via `fmt.Sprintf` (Parameter-Bind unterstützt SQLite für DDL-Names nicht), aber durch eine Allowlist filtern. So ist *kein* User-Input möglich, selbst wenn `dim` versehentlich aus außen gespeist würde.
-💻 **Code-Änderung** — `internal/application/repository/retriever/sqlite/repository.go` (neue Helper-Funktion + Aufrufstellen)
+### 🔴 Problem 10: SQLite table names via `fmt.Sprintf` in queries
+🔍 **Root cause:** `fmt.Sprintf` interpolates the table directly into the SQL string; while the value internally comes from `vecTableName(dim)`, this pattern sets a precedent for later user inputs.
+✅ **Fix strategy:** Continue using `fmt.Sprintf` for table names (SQLite does not support parameter binding for DDL names), but filter through an allowlist. *No* user input is possible, even if `dim` were ever sourced externally.
+💻 **Code change** — `internal/application/repository/retriever/sqlite/repository.go` (new helper + call sites)
 ```go
-// NEU (modul-private Helper-Funktion oben in der Datei)
+// NEW (module-private helper at top of file)
 var allowedVecDims = map[int]bool{384: true, 512: true, 768: true, 1024: true, 1536: true, 2048: true, 3072: true, 4096: true}
 
-func safeVecTableName(dim int) (string, error) { // NEU
-    if !allowedVecDims[dim] {                    // NEU
-        return "", fmt.Errorf("vec dim %d not allowlisted", dim) // NEU
-    }                                            // NEU
-    return vecTableName(dim), nil                // NEU
-}                                                // NEU
+func safeVecTableName(dim int) (string, error) { // NEW
+    if !allowedVecDims[dim] {                    // NEW
+        return "", fmt.Errorf("vec dim %d not allowlisted", dim) // NEW
+    }                                            // NEW
+    return vecTableName(dim), nil                // NEW
+}                                                // NEW
 ```
 ```go
-// GEÄNDERT: 503, 520, 533 — Aufruf statt direktes vecTableName
-tbl, err := safeVecTableName(dim) // NEU
-if err != nil {                   // NEU
-    return                        // NEU
-}                                 // NEU
-sql := fmt.Sprintf("INSERT INTO %s(rowid, embedding) VALUES (?, ?)", tbl) // GEÄNDERT
+// CHANGED: 503, 520, 533 — call helper instead of vecTableName directly
+tbl, err := safeVecTableName(dim) // NEW
+if err != nil {                   // NEW
+    return                        // NEW
+}                                 // NEW
+sql := fmt.Sprintf("INSERT INTO %s(rowid, embedding) VALUES (?, ?)", tbl) // CHANGED
 r.db.Exec(sql, rowID, blob)
 ```
-🛡️ **No-Regression-Check:** Allowlist deckt alle aktuell von Embedding-Modellen genutzten Dimensionen ab. Neue Modelle müssen explizit eingetragen werden — gewollte Reibung.
+🛡️ **No-regression check:** Allowlist covers all dimensions used by current embedding models. New models have to be entered explicitly — intentional friction.
 
 ---
 
 ## HIGH FIXES
 
 ### 🔴 Problem 11: `_ = c.ShouldBindJSON(&req)` in `tag.go`
-🔍 **Ursache:** Bind-Fehler wird ignoriert; ein Body mit falschem Typ landet stillschweigend mit Zero-Values im weiteren Code.
-✅ **Fix-Strategie:** Bind-Fehler nur bei nicht-leerem Body als Hard-Fail werten (Endpoint nimmt Body optional) — exakte Geschäftslogik bleibt.
-💻 **Code-Änderung** — `internal/handler/tag.go:303-306`
+🔍 **Root cause:** Bind error is ignored; a body with the wrong type silently lands in downstream code with zero values.
+✅ **Fix strategy:** Treat bind errors only as hard fail when the body is non-empty (endpoint accepts body optionally) — exact business logic preserved.
+💻 **Code change** — `internal/handler/tag.go:303-306`
 ```go
 var req DeleteTagRequest
-if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF { // GEÄNDERT
-    c.Error(errors.NewBadRequestError("invalid request body"))   // NEU
-    return                                                       // NEU
-}                                                                // GEÄNDERT
+if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF { // CHANGED
+    c.Error(errors.NewBadRequestError("invalid request body"))   // NEW
+    return                                                       // NEW
+}                                                                // CHANGED
 ```
-🛡️ **No-Regression-Check:** Aufrufer ohne Body senden weiter `EOF` — das wird ignoriert, exakt das aktuelle Verhalten. Aufrufer mit Garbage-Body bekommen jetzt 400 statt eines Phantom-Erfolgs.
+🛡️ **No-regression check:** Callers without a body still send `EOF` — that is ignored, exactly the current behaviour. Callers with garbage bodies now get 400 instead of phantom success.
 
 ---
 
-### 🔴 Problem 12: `math/rand` (global) in `RandomSelect` und Standard-Imports
-🔍 **Ursache:** Globaler `math/rand` ist ohne explizites Seeding deterministisch, ohne Seed schwach für Auswahl­logik in HTTP-Handlern.
-✅ **Fix-Strategie:** Auf `math/rand/v2` umstellen — keine API-Bruchstelle für `RandomSelect`-Aufrufer.
-💻 **Code-Änderung** — `internal/handler/initialization.go:8, 2372`
+### 🔴 Problem 12: `math/rand` (global) in `RandomSelect` and standard imports
+🔍 **Root cause:** Global `math/rand` is deterministic without explicit seeding, weak for selection logic in HTTP handlers.
+✅ **Fix strategy:** Switch to `math/rand/v2` — no API breakage for `RandomSelect` callers.
+💻 **Code change** — `internal/handler/initialization.go:8, 2372`
 ```go
 import (
-    // ... unverändert
-    rand "math/rand/v2"  // GEÄNDERT
+    // ... unchanged
+    rand "math/rand/v2"  // CHANGED
     // ...
 )
 ```
 ```go
 func (h *InitializationHandler) FabriTag(c *gin.Context) {
-    n := rand.IntN(len(tagOptions)-1) + 1   // GEÄNDERT: rand.IntN statt rand.Intn
+    n := rand.IntN(len(tagOptions)-1) + 1   // CHANGED: rand.IntN instead of rand.Intn
     tagRandom := RandomSelect(tagOptions, n)
-    // ... unverändert
+    // ... unchanged
 }
 ```
-🛡️ **No-Regression-Check:** `math/rand/v2` ist seit Go 1.22 stabil; das Modul deklariert `go 1.24.11`. Ergebnisse bleiben pseudo-zufällig, aber kryptographisch besser geseedet.
+🛡️ **No-regression check:** `math/rand/v2` is stable since Go 1.22; the module declares `go 1.24.11`. Results stay pseudo-random but cryptographically better seeded.
 
 ---
 
-### 🔴 Problem 13: Reranker-`http.Client{}` ohne Timeout
-🔍 **Ursache:** Ein Default-`&http.Client{}` hat `Timeout: 0` (unendlich) — eine hängende Upstream-Verbindung blockiert eine Goroutine bis zum OS-Connection-Reset.
-✅ **Fix-Strategie:** Ein gemeinsames Default-Timeout setzen (90 s, Reranker-Aufrufe sind kurz). Vier Stellen, identisches Pattern.
-💻 **Code-Änderung** — `internal/models/rerank/zhipu_reranker.go:74` (analog `aliyun_reranker.go:90`, `jina_reranker.go:63`, `remote_api.go:65`)
+### 🔴 Problem 13: Reranker `http.Client{}` without timeout
+🔍 **Root cause:** A default `&http.Client{}` has `Timeout: 0` (infinite) — a hung upstream connection blocks a goroutine until the OS connection reset.
+✅ **Fix strategy:** Set a shared default timeout (90s, reranker calls are short). Four sites, identical pattern.
+💻 **Code change** — `internal/models/rerank/zhipu_reranker.go:74` (analogous to `aliyun_reranker.go:90`, `jina_reranker.go:63`, `remote_api.go:65`)
 ```go
 return &ZhipuReranker{
     modelName: config.ModelName,
     modelID:   config.ModelID,
     apiKey:    apiKey,
     baseURL:   baseURL,
-    client:    &http.Client{Timeout: 90 * time.Second}, // GEÄNDERT
+    client:    &http.Client{Timeout: 90 * time.Second}, // CHANGED
 }, nil
 ```
-🛡️ **No-Regression-Check:** 90 s ist großzügig für Reranking. Bei Bedarf via Config tun­able machen — Folge-Ticket.
+🛡️ **No-regression check:** 90s is generous for reranking. Make tunable via config if needed — follow-up ticket.
 
 ---
 
-### 🔴 Problem 14: WeChat-Datei-Download ohne SSRF-Validierung
-🔍 **Ursache:** `msg.FileKey` ist eine vom Server (oder einem manipulierten Webhook-Payload) gelieferte URL — sie wird ohne Schema-/IP-Check direkt gefetcht.
-✅ **Fix-Strategie:** Vorhandene `utils.NewSSRFSafeHTTPClient` nutzen statt des Modul-`ilinkHTTPClient`. Pattern existiert bereits (`mineru_cloud_converter.go:172`).
-💻 **Code-Änderung** — `internal/im/wechat/adapter.go:155-163`
+### 🔴 Problem 14: WeChat file download without SSRF validation
+🔍 **Root cause:** `msg.FileKey` is a server-supplied URL (or one in a manipulated webhook payload) — fetched directly without scheme/IP check.
+✅ **Fix strategy:** Use the existing `utils.NewSSRFSafeHTTPClient` instead of the module `ilinkHTTPClient`. The pattern already exists in `mineru_cloud_converter.go:172`.
+💻 **Code change** — `internal/im/wechat/adapter.go:155-163`
 ```go
-// GEÄNDERT: SSRF-Validierung der URL
-if err := utils.ValidateURLForSSRF(msg.FileKey); err != nil { // NEU
-    return nil, "", fmt.Errorf("reject unsafe file URL: %w", err) // NEU
-}                                                                  // NEU
+// CHANGED: SSRF validation of the URL
+if err := utils.ValidateURLForSSRF(msg.FileKey); err != nil { // NEW
+    return nil, "", fmt.Errorf("reject unsafe file URL: %w", err) // NEW
+}                                                                  // NEW
 
 req, err := http.NewRequestWithContext(ctx, http.MethodGet, msg.FileKey, nil)
 if err != nil {
     return nil, "", fmt.Errorf("create download request: %w", err)
 }
 
-client := utils.NewSSRFSafeHTTPClient(utils.SSRFSafeHTTPClientConfig{ // GEÄNDERT
-    Timeout:      120 * time.Second,                                  // GEÄNDERT
-    MaxRedirects: 5,                                                  // GEÄNDERT
-})                                                                    // GEÄNDERT
-resp, err := client.Do(req)                                           // GEÄNDERT (war: ilinkHTTPClient)
+client := utils.NewSSRFSafeHTTPClient(utils.SSRFSafeHTTPClientConfig{ // CHANGED
+    Timeout:      120 * time.Second,                                  // CHANGED
+    MaxRedirects: 5,                                                  // CHANGED
+})                                                                    // CHANGED
+resp, err := client.Do(req)                                           // CHANGED (was: ilinkHTTPClient)
 ```
-🛡️ **No-Regression-Check:** WeChat-CDN-Domains liegen üblicherweise im öffentlichen Adressraum — die SSRF-Allowlist im `utils.IsSSRFWhitelisted` muss ggf. um die WeChat-Domain ergänzt werden, falls private/spezielle Routen nötig sind.
+🛡️ **No-regression check:** WeChat CDN domains usually live in public address space — the SSRF allowlist in `utils.IsSSRFWhitelisted` may need extension with the WeChat domain if private/special routes are required.
 
 ---
 
-### 🔴 Problem 15: 13× ignorierte `saveKBCloneProgress`-Fehler
-🔍 **Ursache:** `_ = s.saveKBCloneProgress(...)` verwirft Persistenz-Fehler still; ein DB-Glitch lässt das Klon-Job ohne sichtbaren Status weiterlaufen.
-✅ **Fix-Strategie:** Auf einen einheitlichen `logger.Errorf(...)`-Fehlerpfad umstellen — kein Abbruch der Operation, aber Sichtbarkeit.
-💻 **Code-Änderung** — `internal/application/service/knowledge_clone_move.go:260, 310, 342, 368, 413, 430, 440, 484, 579, 743, 758, 797, 810`
+### 🔴 Problem 15: 13× ignored `saveKBCloneProgress` errors
+🔍 **Root cause:** `_ = s.saveKBCloneProgress(...)` silently discards persistence errors; a DB glitch leaves the clone job running with no visible status.
+✅ **Fix strategy:** Switch to a unified `logger.Errorf(...)` error path — no operation abort, but visibility.
+💻 **Code change** — `internal/application/service/knowledge_clone_move.go:260, 310, 342, 368, 413, 430, 440, 484, 579, 743, 758, 797, 810`
 ```go
-// Alle 13 Stellen — Pattern identisch:
-if err := s.saveKBCloneProgress(ctx, progress); err != nil {       // GEÄNDERT
-    logger.Errorf(ctx, "Failed to persist KB clone progress: %v", err) // NEU
+// All 13 sites — pattern identical:
+if err := s.saveKBCloneProgress(ctx, progress); err != nil {       // CHANGED
+    logger.Errorf(ctx, "Failed to persist KB clone progress: %v", err) // NEW
 }
 ```
-🛡️ **No-Regression-Check:** Die Funktion wird häufig in Try-und-Hopp-Pfaden gerufen (z. B. `handleError` Z. 254-261). Die zusätzliche Log-Zeile macht keine Funktion fehlschlagen.
+🛡️ **No-regression check:** The function is called frequently in fire-and-forget paths (e.g. `handleError` lines 254-261). The added log line does not cause any function to fail.
 
 ---
 
 ### 🔴 Problem 16: `actions/checkout@v3` (deprecated)
-🔍 **Ursache:** GitHub Actions v3 erhält keine Patches mehr; v4 ist drop-in.
-✅ **Fix-Strategie:** Pattern-Replace im Workflow.
-💻 **Code-Änderung** — `.github/workflows/docker-image.yml:18, 67, 100, 143`
+🔍 **Root cause:** GitHub Actions v3 receives no further patches; v4 is drop-in.
+✅ **Fix strategy:** Pattern replace in the workflow.
+💻 **Code change** — `.github/workflows/docker-image.yml:18, 67, 100, 143`
 ```yaml
-- uses: actions/checkout@v4   # GEÄNDERT (alle 4 Stellen)
+- uses: actions/checkout@v4   # CHANGED (all 4 locations)
 ```
-🛡️ **No-Regression-Check:** v4 erfordert Node 20-Runner — `ubuntu-latest` liefert das bereits.
+🛡️ **No-regression check:** v4 requires Node 20 runner — `ubuntu-latest` already provides it.
 
 ---
 
-### 🔴 Problem 17: `:latest`-Image-Tags
-🔍 **Ursache:** `:latest` ist nicht reproduzierbar — Upstream-Major-Bump kann Compose-Up brechen.
-✅ **Fix-Strategie:** Konkrete Versionen pinnen. Hier nur Default-Werte vorschlagen; `WEKNORA_VERSION` aus Env behalten.
-💻 **Code-Änderung** — `docker-compose.yml:3, 29, 144, 174, 290, 366` (analog `docker-compose.dev.yml:39, 106, 165, 190`)
+### 🔴 Problem 17: `:latest` image tags
+🔍 **Root cause:** `:latest` is non-reproducible — an upstream major bump can break compose-up.
+✅ **Fix strategy:** Pin specific versions. Suggesting only default values here; keep `WEKNORA_VERSION` from env.
+💻 **Code change** — `docker-compose.yml:3, 29, 144, 174, 290, 366` (analogous `docker-compose.dev.yml:39, 106, 165, 190`)
 ```yaml
-# GEÄNDERT — beispielhaft, Versionen vor Commit verifizieren
+# CHANGED — example, verify versions before commit
 image: wechatopenai/weknora-ui:${WEKNORA_VERSION:-v0.5.1}
 image: wechatopenai/weknora-app:${WEKNORA_VERSION:-v0.5.1}
 image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-v0.5.1}
@@ -415,211 +415,211 @@ image: dexidp/dex:v2.41.1
 image: neo4j:5.24-community
 image: jaegertracing/all-in-one:1.76.0
 ```
-🛡️ **No-Regression-Check:** Alle Tags müssen real existieren — vor Merge `docker pull <image>:<tag>` testen.
+🛡️ **No-regression check:** All tags must really exist — `docker pull <image>:<tag>` test before merge.
 
 ---
 
-### 🔴 Problem 18: `migrate.sh` loggt DB-Passwort in Klartext
-🔍 **Ursache:** `echo "DB_PASSWORD: ${DB_PASSWORD}"` läuft in jeder Migration und landet in CI-Logs / Container-Logs.
-✅ **Fix-Strategie:** Zeile entfernen; restliche Logs unverändert (DB-URL ohne Passwort als Hint reicht).
-💻 **Code-Änderung** — `scripts/migrate.sh:67-69`
+### 🔴 Problem 18: `migrate.sh` logs DB password in plaintext
+🔍 **Root cause:** `echo "DB_PASSWORD: ${DB_PASSWORD}"` runs on every migration and lands in CI logs / container logs.
+✅ **Fix strategy:** Remove the line; remaining logs unchanged (DB URL without password as hint suffices).
+💻 **Code change** — `scripts/migrate.sh:67-69`
 ```bash
-# GEÄNDERT
+# CHANGED
 echo "DB_USER: ${DB_USER}"
-# ENTFERNEN: echo "DB_PASSWORD: ${DB_PASSWORD}"
+# REMOVE: echo "DB_PASSWORD: ${DB_PASSWORD}"
 echo "DB_HOST: ${DB_HOST}"
 ```
-Zusätzlich `DB_URL`-Output sanitisieren:
+Additionally sanitize the `DB_URL` echo:
 ```bash
-# NEU vor "echo DB_URL"
+# NEW before "echo DB_URL"
 SANITIZED_URL="${DB_URL//${DB_PASSWORD}/***}"
 echo "DB_URL: ${SANITIZED_URL}"
 ```
-🛡️ **No-Regression-Check:** Migrations-Aufruf nutzt `${DB_URL}` weiter — nur das *Echo* wird redacted.
+🛡️ **No-regression check:** Migration call still uses `${DB_URL}` — only the *echo* is redacted.
 
 ---
 
-### 🔴 Problem 19: 13 Vue-`{ deep: true }`-Watcher
-🔍 **Ursache:** `deep: true` traversiert bei jedem Re-Set den gesamten Objekt-Baum — O(n) pro Change auf großen Listen.
-✅ **Fix-Strategie:** Wo möglich auf Surrogat (`computed` mit `JSON.stringify`-Hash oder Selector) wechseln. Minimal: bei Listen via `() => list.length` als Watcher-Source. Pro Datei einzelner Patch — hier ein repräsentatives Beispiel für `views/chat/index.vue:213-218`:
-💻 **Code-Änderung**
+### 🔴 Problem 19: 13 Vue `{ deep: true }` watchers
+🔍 **Root cause:** `deep: true` traverses the whole object tree on every re-set — O(n) per change on large lists.
+✅ **Fix strategy:** Where possible switch to a surrogate (`computed` with `JSON.stringify` hash or selector). Minimal: for lists use `() => list.length` as the watcher source. Per-file individual patch — representative example for `views/chat/index.vue:213-218`:
+💻 **Code change**
 ```ts
-// GEÄNDERT: messagesList → messagesList.length + Selector
+// CHANGED: messagesList → messagesList.length + selector
 watch(
-  () => messagesList.value.length,                        // GEÄNDERT
-  () => { /* aktuelle Logik unverändert */ },
+  () => messagesList.value.length,                        // CHANGED
+  () => { /* current logic unchanged */ },
 )
 ```
-🛡️ **No-Regression-Check:** Ändert Trigger-Frequenz: Watcher feuert nur bei Längen­änderung, nicht bei Inhalts-Mutation. Wenn Inhalts-Mutation beobachtet werden muss, gezielt auf das Feld watchen, nicht auf den ganzen Baum. Pro Stelle einzeln zu prüfen.
+🛡️ **No-regression check:** Changes trigger frequency: watcher fires only on length change, not on content mutation. If content mutation must be observed, watch the specific field, not the whole tree. Per-site review required.
 
 ---
 
-### 🔴 Problem 20: `context.Background()` in 13 Stellen (Queue, Service-Startup, Goroutines)
-🔍 **Ursache:** Detached `context.Background()` ignoriert Shutdown-Signal und Request-Deadline — Goroutines überleben Server-Stop.
-✅ **Fix-Strategie:** Wo Parent-Ctx erreichbar: durchreichen. Wo nicht: einen langlebigen `serviceCtx` aus dem Container injizieren, der auf `os.Signal` cancelt.
+### 🔴 Problem 20: `context.Background()` in 13 places (queue, service startup, goroutines)
+🔍 **Root cause:** Detached `context.Background()` ignores shutdown signal and request deadline — goroutines outlive server stop.
+✅ **Fix strategy:** Where parent ctx is reachable: thread it through. Where not: inject a long-lived `serviceCtx` from the container that cancels on `os.Signal`.
 
-💻 **Code-Änderung 1** — `internal/handler/initialization.go:1069-1073`
+💻 **Code change 1** — `internal/handler/initialization.go:1069-1073`
 ```go
-// GEÄNDERT: Parent-Ctx aus Handler nehmen, aber Timeout über das Lifetime des Handlers hinaus
-parentCtx := h.shutdownCtx                                             // NEU (Field, im Constructor gesetzt)
-newCtx, cancel := context.WithTimeout(parentCtx, 12*time.Hour)         // GEÄNDERT
+// CHANGED: take parent ctx from handler, but timeout beyond the handler's lifetime
+parentCtx := h.shutdownCtx                                             // NEW (field, set in constructor)
+newCtx, cancel := context.WithTimeout(parentCtx, 12*time.Hour)         // CHANGED
 go func() {
     defer cancel()
     h.downloadModelAsync(newCtx, taskID, req.ModelName)
 }()
 ```
-Konstruktor-Änderung in `cmd/server/main.go` o. ä. — `shutdownCtx` aus `signal.NotifyContext(...)` an Handler durchreichen.
+Constructor change in `cmd/server/main.go` etc. — pass `shutdownCtx` from `signal.NotifyContext(...)` through to handlers.
 
-💻 **Code-Änderung 2** — `internal/handler/session/agent_stream_handler.go:391-405`
+💻 **Code change 2** — `internal/handler/session/agent_stream_handler.go:391-405`
 ```go
-// GEÄNDERT: keine eigene bgCtx mehr; Parent-Ctx (mit kurzer Verlängerung) verwenden
-ctxAppend, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second) // NEU
-defer cancel()                                                                       // NEU
-if err := h.streamManager.AppendEvent(ctxAppend, h.sessionID, h.assistantMessageID, // GEÄNDERT
-    interfaces.StreamEvent{ /* unverändert */ }); err != nil {
+// CHANGED: no own bgCtx; use parent ctx (with short extension)
+ctxAppend, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second) // NEW
+defer cancel()                                                                       // NEW
+if err := h.streamManager.AppendEvent(ctxAppend, h.sessionID, h.assistantMessageID, // CHANGED
+    interfaces.StreamEvent{ /* unchanged */ }); err != nil {
     logger.GetLogger(h.ctx).Warn("…", "error", err)
 }
 ```
-*(`context.WithoutCancel` kappt Cancel-Propagation, behält aber Werte wie TenantID — Go 1.21+.)*
+*(`context.WithoutCancel` strips cancel propagation but keeps values like TenantID — Go 1.21+.)*
 
-💻 **Code-Änderung 3** — `internal/application/service/session.go:507-520`
+💻 **Code change 3** — `internal/application/service/session.go:507-520`
 ```go
 go func() {
-    bgCtx := context.WithoutCancel(ctx) // GEÄNDERT: Werte erhalten, Cancel kappen
-    // tenantID/requestID/language/langfuseTrace-Propagation entfällt — context.WithoutCancel macht sie beibehalten
-    // … restliche Logik unverändert
+    bgCtx := context.WithoutCancel(ctx) // CHANGED: keep values, strip cancel
+    // tenantID/requestID/language/langfuseTrace propagation drops out — context.WithoutCancel preserves them
+    // … remaining logic unchanged
 }()
 ```
-🛡️ **No-Regression-Check:** `context.WithoutCancel` ist Go 1.21+ — `go.mod` deklariert 1.24, also ok. Werte werden weiterhin propagiert; nur Cancel-Signale nicht.
+🛡️ **No-regression check:** `context.WithoutCancel` is Go 1.21+ — `go.mod` declares 1.24, so fine. Values continue to propagate; only cancel signals don't.
 
 ---
 
-## MEDIUM / WEITERE FIXES (kompakt)
+## MEDIUM / OTHER FIXES (compact)
 
-### 🔴 Problem 21: `json.Marshal` ohne Fehlerprüfung in Feishu (`adapter.go:735, 791, 796, 837, 873, 876, 918`)
-🔍 **Ursache:** `payload, _ := json.Marshal(map[...])` ignoriert Marshalling-Fehler, die für `map[string]interface{}` mit fremden Werten real auftreten können.
-✅ **Fix-Strategie:** `_` durch echte Variable ersetzen + Frühreturn.
-💻 **Code-Änderung** — Beispiel Z. 735:
+### 🔴 Problem 21: `json.Marshal` without error check in Feishu (`adapter.go:735, 791, 796, 837, 873, 876, 918`)
+🔍 **Root cause:** `payload, _ := json.Marshal(map[...])` ignores marshalling errors that can realistically occur with `map[string]interface{}` containing foreign values.
+✅ **Fix strategy:** Replace `_` with a real variable + early return.
+💻 **Code change** — example line 735:
 ```go
-payload, err := json.Marshal(map[string]interface{}{ // GEÄNDERT
+payload, err := json.Marshal(map[string]interface{}{ // CHANGED
     "type": "card_json",
     "data": cardJSON,
 })
-if err != nil {                                       // NEU
-    return "", fmt.Errorf("marshal card payload: %w", err) // NEU
-}                                                     // NEU
+if err != nil {                                       // NEW
+    return "", fmt.Errorf("marshal card payload: %w", err) // NEW
+}                                                     // NEW
 ```
-🛡️ Selber Pattern auf alle 9 Vorkommen anwenden.
+🛡️ Apply the same pattern to all 9 occurrences.
 
 ---
 
-### 🔴 Problem 22: Slack `json.Unmarshal`-Fehler ignoriert (`adapter.go:143`)
-🔍 **Ursache:** Wenn der Body kein JSON ist, bleibt `rawEvent.Event.Files` `nil` — keine Symptomatik, aber stiller Datenverlust.
-✅ **Fix-Strategie:** Fehler loggen, aber den Adapter weiterlaufen lassen (Files sind optional).
-💻 **Code-Änderung**
+### 🔴 Problem 22: Slack `json.Unmarshal` error ignored (`adapter.go:143`)
+🔍 **Root cause:** If the body is not JSON, `rawEvent.Event.Files` stays `nil` — no symptom, but silent data loss.
+✅ **Fix strategy:** Log the error but let the adapter continue (files are optional).
+💻 **Code change**
 ```go
-if err := json.Unmarshal(bodyBytes, &rawEvent); err != nil {                    // GEÄNDERT
-    logger.GetLogger(c.Request.Context()).Warn("slack: parse files failed", "error", err) // NEU
+if err := json.Unmarshal(bodyBytes, &rawEvent); err != nil {                    // CHANGED
+    logger.GetLogger(c.Request.Context()).Warn("slack: parse files failed", "error", err) // NEW
 }
 ```
 
 ---
 
-### 🔴 Problem 23: Ollama-Tool-Param-Unmarshal ignoriert (`models/chat/ollama.go:193, 200`)
-🔍 **Ursache:** Stiller Datenverlust bei Tool-Calls, die nachher mit leerem `Parameters`-Map ausgeführt werden.
-✅ **Fix-Strategie:** Fehler loggen + den betroffenen Tool-Call überspringen statt mit leeren Params auszuführen.
-💻 **Code-Änderung** (Pseudo-Pattern):
+### 🔴 Problem 23: Ollama tool param unmarshal ignored (`models/chat/ollama.go:193, 200`)
+🔍 **Root cause:** Silent data loss on tool calls that are then executed with an empty `Parameters` map.
+✅ **Fix strategy:** Log the error and skip the affected tool call instead of running with empty params.
+💻 **Code change** (pseudo pattern):
 ```go
-if err := json.Unmarshal(tool.Function.Parameters, &function.Parameters); err != nil { // GEÄNDERT
-    logger.Warnf(ctx, "skip tool with bad params: %v", err)                            // NEU
-    continue                                                                           // NEU
+if err := json.Unmarshal(tool.Function.Parameters, &function.Parameters); err != nil { // CHANGED
+    logger.Warnf(ctx, "skip tool with bad params: %v", err)                            // NEW
+    continue                                                                           // NEW
 }
 ```
 
 ---
 
-### 🔴 Problem 24: `resp.Body.Close()` ohne `defer` in MinerU-Convertern
-🔍 **Ursache:** Bei Fehler zwischen `resp` und expliziter `Close()` leakt der Body-Reader.
-✅ **Fix-Strategie:** Auf `defer` umstellen — keine Logik­änderung.
-💻 **Code-Änderung** — `internal/infrastructure/docparser/mineru_cloud_converter.go:177`, `mineru_converter.go:263`
+### 🔴 Problem 24: `resp.Body.Close()` without `defer` in MinerU converters
+🔍 **Root cause:** On error between `resp` and explicit `Close()` the body reader leaks.
+✅ **Fix strategy:** Switch to `defer` — no logic change.
+💻 **Code change** — `internal/infrastructure/docparser/mineru_cloud_converter.go:177`, `mineru_converter.go:263`
 ```go
 resp, err := client.Do(httpReq)
 if err != nil {
     return fmt.Errorf("PUT upload: %w", err)
 }
-defer resp.Body.Close()           // GEÄNDERT (vorher direkter resp.Body.Close())
+defer resp.Body.Close()           // CHANGED (was direct resp.Body.Close())
 ```
 
 ---
 
-### 🔴 Problem 25: `defer file.Close()` ohne Fehlerprüfung (`initialization.go:2038`)
-🔍 **Ursache:** Bei Upload-Streams maskiert ein verschluckter Close-Fehler einen unvollständigen Schreib-Flush.
-✅ **Fix-Strategie:** Wrapper-Funktion einsetzen, die das Ergebnis loggt — keine Logik­änderung.
-💻 **Code-Änderung**
+### 🔴 Problem 25: `defer file.Close()` without error check (`initialization.go:2038`)
+🔍 **Root cause:** On upload streams, a swallowed close error masks an incomplete write flush.
+✅ **Fix strategy:** Use a wrapper function that logs the result — no logic change.
+💻 **Code change**
 ```go
-defer func() {                                                              // GEÄNDERT
-    if cerr := file.Close(); cerr != nil {                                  // NEU
-        logger.Warnf(ctx, "close uploaded file: %v", cerr)                  // NEU
-    }                                                                       // NEU
-}()                                                                         // GEÄNDERT
+defer func() {                                                              // CHANGED
+    if cerr := file.Close(); cerr != nil {                                  // NEW
+        logger.Warnf(ctx, "close uploaded file: %v", cerr)                  // NEW
+    }                                                                       // NEW
+}()                                                                         // CHANGED
 ```
 
 ---
 
-### 🔴 Problem 26: `asyncio` / DNS-Lookup mit `context.Background()`
-🔍 **Ursache:** `net.DefaultResolver.LookupIP(context.Background(), …)` ignoriert Aufrufer-Timeout.
-✅ **Fix-Strategie:** Aufrufer-Ctx durchreichen (existiert bereits in der umgebenden Funktion).
-💻 **Code-Änderung** — `internal/agent/tools/web_fetch.go:286`, `internal/infrastructure/web_fetch/fetcher.go:53`
+### 🔴 Problem 26: `asyncio` / DNS lookup with `context.Background()`
+🔍 **Root cause:** `net.DefaultResolver.LookupIP(context.Background(), …)` ignores caller timeout.
+✅ **Fix strategy:** Thread the caller's ctx through (already exists in the surrounding function).
+💻 **Code change** — `internal/agent/tools/web_fetch.go:286`, `internal/infrastructure/web_fetch/fetcher.go:53`
 ```go
-ips, err := net.DefaultResolver.LookupIP(ctx, "ip", hostname) // GEÄNDERT
+ips, err := net.DefaultResolver.LookupIP(ctx, "ip", hostname) // CHANGED
 ```
 
 ---
 
-### 🔴 Problem 27: `v-html` ohne durchgängige Sanitisierung (Frontend)
-🔍 **Ursache:** Mehrere `v-html`-Sites (`AgentStreamDisplay.vue:329, 365`; `GlobalCommandPalette.vue:127, 154`) verlassen sich darauf, dass Aufrufer den Content schon „sicher" hinterlassen haben.
-✅ **Fix-Strategie:** Einen einzigen `safeHtml(...)`-Helper erzwingen, der `dompurify.sanitize` mit konservativem Profile aufruft. Alle `v-html`-Bindings nur über diesen Helper. Kein Refactoring der umgebenden Komponenten.
-💻 **Code-Änderung** — `frontend/src/utils/security.ts` (Helper bereits vorhanden, aber nicht überall genutzt):
+### 🔴 Problem 27: `v-html` without consistent sanitization (frontend)
+🔍 **Root cause:** Several `v-html` sites (`AgentStreamDisplay.vue:329, 365`; `GlobalCommandPalette.vue:127, 154`) rely on the caller having already left the content "safe".
+✅ **Fix strategy:** Enforce a single `safeHtml(...)` helper that calls `dompurify.sanitize` with a conservative profile. All `v-html` bindings only via this helper. No refactor of surrounding components.
+💻 **Code change** — `frontend/src/utils/security.ts` (helper already exists, but not used everywhere):
 ```ts
-// In jeder verbleibenden Komponente:
-import { safeHtml } from '@/utils/security'  // NEU
+// In each remaining component:
+import { safeHtml } from '@/utils/security'  // NEW
 ```
 ```vue
-<!-- GEÄNDERT in den vier betroffenen Templates -->
+<!-- CHANGED in the four affected templates -->
 <div v-html="safeHtml(floatPopup.content)" />
 <div v-html="safeHtml(wikiDrawerContent)" />
 <div v-html="safeHtml(highlight(item.label, query))" />
 ```
-🛡️ Bei `highlight(...)` zusätzlich verifizieren, dass die HTML-Konstruktion nur `<mark>`-Tags einfügt — Whitelist im DOMPurify-Profil entsprechend setzen.
+🛡️ With `highlight(...)` additionally verify that the HTML construction only inserts `<mark>` tags — set the DOMPurify profile whitelist accordingly.
 
 ---
 
-### 🔴 Problem 28: SSE/Stream wird beim Routenwechsel nicht abgebrochen
-🔍 **Ursache:** Der `AbortController` wird nur in `stopStream()` & `onUnmounted` aufgerufen — Routenwechsel ohne Unmount der Composable lässt den Stream weiterlaufen.
-✅ **Fix-Strategie:** In der konsumierenden View einen `onBeforeRouteLeave`-Hook ergänzen.
-💻 **Code-Änderung** — `frontend/src/views/chat/index.vue` (in passender Position der Composition-API-Section)
+### 🔴 Problem 28: SSE/stream not aborted on route change
+🔍 **Root cause:** The `AbortController` is only invoked in `stopStream()` & `onUnmounted` — a route change without composable unmount lets the stream continue.
+✅ **Fix strategy:** Add an `onBeforeRouteLeave` hook in the consuming view.
+💻 **Code change** — `frontend/src/views/chat/index.vue` (placed appropriately in the Composition API section)
 ```ts
-import { onBeforeRouteLeave } from 'vue-router' // NEU
+import { onBeforeRouteLeave } from 'vue-router' // NEW
 
-onBeforeRouteLeave(() => {                       // NEU
-  stopStream?.()                                  // NEU
-})                                                // NEU
+onBeforeRouteLeave(() => {                       // NEW
+  stopStream?.()                                  // NEW
+})                                                // NEW
 ```
 
 ---
 
-### 🔴 Problem 29: WeChat-Polling-Timer nicht garantiert geleert
-🔍 **Ursache:** `wechatPollTimer = setTimeout(pollOnce, 500)` setzt sich rekursiv neu; falls `stopWeChatPolling()` mitten im `pollOnce()`-Lauf aufgerufen wird, hat ein in-flight Promise bereits den nächsten `setTimeout` queue'd.
-✅ **Fix-Strategie:** Vor dem `setTimeout` `wechatPollActive`-Check zwingen — bestehender Code hat das schon (Z. 574). Zusätzlich `stopWeChatPolling` im finally-Block der pollOnce-Funktion sicher abrufen, falls Backend einen Final-Status meldet.
-💻 **Code-Änderung** — `frontend/src/components/IMChannelPanel.vue:573-577`
+### 🔴 Problem 29: WeChat polling timer not guaranteed cleared
+🔍 **Root cause:** `wechatPollTimer = setTimeout(pollOnce, 500)` re-arms recursively; if `stopWeChatPolling()` is called mid-`pollOnce()`, an in-flight promise has already queued the next `setTimeout`.
+✅ **Fix strategy:** Force the `wechatPollActive` check before `setTimeout` — current code already does that (line 574). Additionally call `stopWeChatPolling` safely in the finally block of pollOnce, in case the backend reports a final status.
+💻 **Code change** — `frontend/src/components/IMChannelPanel.vue:573-577`
 ```ts
 } catch {
   // transient error
-} finally {                                                  // NEU
-  if (!wechatPollActive && wechatPollTimer) {                // NEU
-    clearTimeout(wechatPollTimer)                            // NEU
-    wechatPollTimer = null                                   // NEU
-  }                                                          // NEU
+} finally {                                                  // NEW
+  if (!wechatPollActive && wechatPollTimer) {                // NEW
+    clearTimeout(wechatPollTimer)                            // NEW
+    wechatPollTimer = null                                   // NEW
+  }                                                          // NEW
 }
 if (wechatPollActive) {
   wechatPollTimer = setTimeout(pollOnce, 500)
@@ -628,39 +628,39 @@ if (wechatPollActive) {
 
 ---
 
-### 🔴 Problem 30: `subprocess.run(["which", …])` ohne `timeout=`
-🔍 **Ursache:** `which` mit korruptem `PATH` kann hängen.
-✅ **Fix-Strategie:** Konstantes 5 s-Timeout setzen.
-💻 **Code-Änderung** — `docreader/parser/doc_parser.py:258-260`
+### 🔴 Problem 30: `subprocess.run(["which", …])` without `timeout=`
+🔍 **Root cause:** `which` with a corrupted `PATH` can hang.
+✅ **Fix strategy:** Set a constant 5s timeout.
+💻 **Code change** — `docreader/parser/doc_parser.py:258-260`
 ```python
 result = subprocess.run(
     ["which", executable_name],
     capture_output=True, text=True,
-    timeout=5,  # NEU
+    timeout=5,  # NEW
 )
 ```
 
 ---
 
-### 🔴 Problem 31: `print()` in Library-Code (DocReader)
-🔍 **Ursache:** Library-Output landet auf stdout, wird vom strukturierten Logger nicht erfasst.
-✅ **Fix-Strategie:** 1:1-Ersatz `print(x)` → `logger.info(x)`. Pattern auf alle Vorkommen (`chain_parser.py:179`, `markdown_parser.py:124`, `web_parser.py:149-162`, `excel_parser.py:114-118`).
-💻 **Code-Änderung** (Beispiel)
+### 🔴 Problem 31: `print()` in library code (DocReader)
+🔍 **Root cause:** Library output ends up on stdout, the structured logger never sees it.
+✅ **Fix strategy:** 1:1 replace `print(x)` → `logger.info(x)`. Apply the pattern to all occurrences (`chain_parser.py:179`, `markdown_parser.py:124`, `web_parser.py:149-162`, `excel_parser.py:114-118`).
+💻 **Code change** (example)
 ```python
-# GEÄNDERT
+# CHANGED
 logger.info(format_content)
 ```
 
 ---
 
 ### 🔴 Problem 32: `chain_parser.py:62` — bare `except Exception:`
-🔍 **Ursache:** Fängt zu breit (inkl. Programmfehler), versteckt Diagnose.
-✅ **Fix-Strategie:** Auf `(IOError, ValueError, RuntimeError)` einengen — bekannte Parser-Fehlerklassen. `KeyboardInterrupt`/`SystemExit` propagieren weiter.
-💻 **Code-Änderung**
+🔍 **Root cause:** Catches too broadly (incl. programming errors), hides diagnostics.
+✅ **Fix strategy:** Narrow to `(IOError, ValueError, RuntimeError)` — known parser error classes. `KeyboardInterrupt`/`SystemExit` continue to propagate.
+💻 **Code change**
 ```python
 try:
     document = p.parse_into_text(content)
-except (IOError, ValueError, RuntimeError) as e:    # GEÄNDERT
+except (IOError, ValueError, RuntimeError) as e:    # CHANGED
     logger.exception(
         "FirstParser: parser %s failed: %s; trying next",
         p.__class__.__name__, e,
@@ -670,85 +670,85 @@ except (IOError, ValueError, RuntimeError) as e:    # GEÄNDERT
 
 ---
 
-### 🔴 Problem 33: `target="_blank"` ohne `rel="noopener noreferrer"`
-🔍 **Ursache:** Ohne `rel` kann die Zielseite via `window.opener` zurück-manipulieren.
-✅ **Fix-Strategie:** `rel`-Attribut nachpflegen — reine Template-Änderungen.
-💻 **Code-Änderung** — `frontend/src/views/auth/Login.vue:96, 102, 111`, `frontend/src/views/chat/components/docInfo.vue:17`, `frontend/src/views/settings/StorageEngineSettings.vue:253-362`
+### 🔴 Problem 33: `target="_blank"` without `rel="noopener noreferrer"`
+🔍 **Root cause:** Without `rel`, the target page can manipulate via `window.opener`.
+✅ **Fix strategy:** Add the `rel` attribute — pure template change.
+💻 **Code change** — `frontend/src/views/auth/Login.vue:96, 102, 111`, `frontend/src/views/chat/components/docInfo.vue:17`, `frontend/src/views/settings/StorageEngineSettings.vue:253-362`
 ```html
-<a href="…" target="_blank" rel="noopener noreferrer">…</a> <!-- GEÄNDERT -->
+<a href="…" target="_blank" rel="noopener noreferrer">…</a> <!-- CHANGED -->
 ```
 
 ---
 
 ### 🔴 Problem 34: `.catch(() => {})` (6×)
-🔍 **Ursache:** Fehler werden ohne Log/UI verschluckt.
-✅ **Fix-Strategie:** `console.warn` als Mindestniveau; bei kritischen Operationen (`saveConfig`) zusätzlich Toast.
-💻 **Code-Änderung** — `frontend/src/components/Input-field.vue:549` (analog 5 weitere Stellen)
+🔍 **Root cause:** Errors are swallowed without log/UI.
+✅ **Fix strategy:** `console.warn` as minimum; for critical operations (`saveConfig`) additionally a toast.
+💻 **Code change** — `frontend/src/components/Input-field.vue:549` (analog 5 other sites)
 ```ts
 orgStore.fetchSharedKnowledgeBases()
-  .catch((err) => console.warn('[fetchSharedKnowledgeBases] failed:', err)) // GEÄNDERT
+  .catch((err) => console.warn('[fetchSharedKnowledgeBases] failed:', err)) // CHANGED
 ```
 
 ---
 
-### 🔴 Problem 35: `set -euo pipefail` fehlt in Shell-Skripten
-🔍 **Ursache:** Unset-Vars werden zu `""`, kaputte Pipes failen still.
-✅ **Fix-Strategie:** Direkt nach Shebang einfügen.
-💻 **Code-Änderung** — `scripts/dev.sh:2`, `scripts/build_images.sh:2`
+### 🔴 Problem 35: `set -euo pipefail` missing in shell scripts
+🔍 **Root cause:** Unset vars become `""`, broken pipes fail silently.
+✅ **Fix strategy:** Insert directly after the shebang.
+💻 **Code change** — `scripts/dev.sh:2`, `scripts/build_images.sh:2`
 ```bash
 #!/bin/bash
-set -euo pipefail   # NEU
+set -euo pipefail   # NEW
 ```
-🛡️ **No-Regression-Check:** Vorhandene optionale Variablen (`${VAR:-default}`) sind weiter ok; ungesetzte ohne Fallback brechen jetzt früh — gewünscht.
+🛡️ **No-regression check:** Existing optional vars (`${VAR:-default}`) are still fine; unset ones without fallback now break early — desired.
 
 ---
 
-### 🔴 Problem 36: Alte Python-Typings (`List`, `Dict`, `Optional`)
-🔍 **Ursache:** PEP 585/604 sind seit 3.10 Standard; `from typing import List, Dict, Optional` verursacht keine Bugs, ist aber Bit-Rot-Ballast.
-✅ **Fix-Strategie:** Suchen-und-Ersetzen pro Datei (`List[X]` → `list[X]`, `Optional[X]` → `X | None`). Importe entsprechend kürzen. Keine Verhaltens­änderung.
-💻 **Code-Änderung** — Beispiel `docreader/parser/doc_parser.py:1-15, 234-236`
+### 🔴 Problem 36: Old Python typings (`List`, `Dict`, `Optional`)
+🔍 **Root cause:** PEP 585/604 is the standard since 3.10; `from typing import List, Dict, Optional` causes no bugs but is bit-rot ballast.
+✅ **Fix strategy:** Search-and-replace per file (`List[X]` → `list[X]`, `Optional[X]` → `X | None`). Shorten imports accordingly. No behaviour change.
+💻 **Code change** — example `docreader/parser/doc_parser.py:1-15, 234-236`
 ```python
-# GEÄNDERT: Imports
-from typing import Any  # NEU (falls noch genutzt)
-# ENTFERNEN: from typing import List, Optional, Dict
+# CHANGED: imports
+from typing import Any  # NEW (if still used)
+# REMOVE: from typing import List, Optional, Dict
 ```
 ```python
 def _try_find_executable_path(
     self,
     executable_name: str,
-    possible_path: list[str] | None = None,        # GEÄNDERT
-    environment_variable: list[str] | None = None, # GEÄNDERT
-) -> str | None:                                   # GEÄNDERT
+    possible_path: list[str] | None = None,        # CHANGED
+    environment_variable: list[str] | None = None, # CHANGED
+) -> str | None:                                   # CHANGED
 ```
 
 ---
 
-### 🔴 Problem 37: Healthchecks fehlen für Redis/Qdrant/Weaviate
-🔍 **Ursache:** Ohne Healthcheck löst `depends_on: service_started` Startup-Race aus; `app` startet zu früh.
-✅ **Fix-Strategie:** Pro Service Healthcheck ergänzen + im `app.depends_on` auf `service_healthy` umstellen.
-💻 **Code-Änderung** — `docker-compose.yml`
+### 🔴 Problem 37: Healthchecks missing for Redis/Qdrant/Weaviate
+🔍 **Root cause:** Without healthchecks, `depends_on: service_started` triggers a startup race; `app` starts too early.
+✅ **Fix strategy:** Add per-service healthcheck + switch `app.depends_on` to `service_healthy`.
+💻 **Code change** — `docker-compose.yml`
 ```yaml
   redis:
-    # ... bestehend
-    healthcheck:                                   # NEU
-      test: ["CMD", "redis-cli", "ping"]           # NEU
-      interval: 10s                                # NEU
-      timeout: 5s                                  # NEU
-      retries: 5                                   # NEU
+    # ... existing
+    healthcheck:                                   # NEW
+      test: ["CMD", "redis-cli", "ping"]           # NEW
+      interval: 10s                                # NEW
+      timeout: 5s                                  # NEW
+      retries: 5                                   # NEW
 
   qdrant:
-    # ... bestehend
-    healthcheck:                                   # NEU
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"] # NEU
-      interval: 10s                                # NEU
-      timeout: 5s                                  # NEU
-      retries: 5                                   # NEU
-      start_period: 20s                            # NEU
+    # ... existing
+    healthcheck:                                   # NEW
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"] # NEW
+      interval: 10s                                # NEW
+      timeout: 5s                                  # NEW
+      retries: 5                                   # NEW
+      start_period: 20s                            # NEW
 
   weaviate:
-    # ... bestehend
-    healthcheck:                                   # NEU
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/v1/.well-known/ready || exit 1"] # NEU
+    # ... existing
+    healthcheck:                                   # NEW
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/v1/.well-known/ready || exit 1"] # NEW
       interval: 10s
       timeout: 5s
       retries: 5
@@ -758,46 +758,46 @@ def _try_find_executable_path(
   app:
     depends_on:
       redis:
-        condition: service_healthy   # GEÄNDERT
+        condition: service_healthy   # CHANGED
       postgres:
         condition: service_healthy
 ```
 
 ---
 
-### 🔴 Problem 38: `.env.example` ↔ `.env.lite.example` Schema-Drift
-🔍 **Ursache:** Schlüssel divergieren (`DB_HOST` vs `DB_PATH`); Kopier-Verwendung führt zu undefinierten Variablen.
-✅ **Fix-Strategie:** Einen kommentierten Header in beide Dateien, der die andere Variante referenziert; gemeinsame Schlüssel auf identische Namen ziehen.
-💻 **Code-Änderung** — `.env.example:1` und `.env.lite.example:1`
+### 🔴 Problem 38: `.env.example` ↔ `.env.lite.example` schema drift
+🔍 **Root cause:** Keys diverge (`DB_HOST` vs `DB_PATH`); copy-use leads to undefined variables.
+✅ **Fix strategy:** A commented header in both files referencing the other variant; common keys aligned to identical names.
+💻 **Code change** — `.env.example:1` and `.env.lite.example:1`
 ```bash
-# WeKnora Environment — Vollversion (Postgres + alle Services).
-# Für SQLite-Lite-Modus: siehe .env.lite.example. Schlüssel-Schemas sind NICHT identisch.
-# Pflicht-Vars: JWT_SECRET, DB_*, MINIO_*, NEO4J_PASSWORD, LANGFUSE_*  # NEU
+# WeKnora environment — full version (Postgres + all services).
+# For SQLite-Lite mode: see .env.lite.example. Key schemas are NOT identical.
+# Required vars: JWT_SECRET, DB_*, MINIO_*, NEO4J_PASSWORD, LANGFUSE_*  # NEW
 ```
 
 ---
 
-### 🔴 Problem 39: Container laufen ggf. als root
-🔍 **Ursache:** Mehrere Dockerfiles haben kein `USER` am Ende; ein Compromise des Prozesses gibt root-im-Container.
-✅ **Fix-Strategie:** Im finalen Stage `USER appuser` setzen. Pattern existiert bereits in `Dockerfile.app` als Vorbild — auf `Dockerfile.docreader`/`frontend/Dockerfile` ausweiten.
-💻 **Code-Änderung**
+### 🔴 Problem 39: Containers possibly running as root
+🔍 **Root cause:** Multiple Dockerfiles have no `USER` at the end; a process compromise grants root in the container.
+✅ **Fix strategy:** Set `USER appuser` in the final stage. Pattern already exists in `Dockerfile.app` as a template — extend to `Dockerfile.docreader`/`frontend/Dockerfile`.
+💻 **Code change**
 ```dockerfile
-# Am Ende des finalen Stage:
-USER appuser   # NEU
+# At the end of the final stage:
+USER appuser   # NEW
 ```
 
 ---
 
 ### 🔴 Problem 40: Race in `fetchSuggestedQuestions`
-🔍 **Ursache:** Der `setTimeout`-Debounce verhindert Mehrfach­anfragen *nicht*, sondern verzögert sie nur; ein zwischenzeitlicher Routenwechsel kann zur falschen Session geliefert werden.
-✅ **Fix-Strategie:** `AbortController` ergänzen, der bei jedem neuen Aufruf den vorherigen abbricht.
-💻 **Code-Änderung** — `frontend/src/views/chat/index.vue:159-189`
+🔍 **Root cause:** The `setTimeout` debounce does *not* prevent multiple requests, only delays them; an interim route switch can deliver to the wrong session.
+✅ **Fix strategy:** Add an `AbortController` that cancels the previous call on each new invocation.
+💻 **Code change** — `frontend/src/views/chat/index.vue:159-189`
 ```ts
-let suggestionsAbort: AbortController | null = null  // NEU
+let suggestionsAbort: AbortController | null = null  // NEW
 
 const fetchSuggestedQuestions = async () => {
-  suggestionsAbort?.abort()                          // NEU
-  suggestionsAbort = new AbortController()           // NEU
+  suggestionsAbort?.abort()                          // NEW
+  suggestionsAbort = new AbortController()           // NEW
   const fetchId = ++suggestedQuestionsFetchId
   // ...
   try {
@@ -805,30 +805,242 @@ const fetchSuggestedQuestions = async () => {
       knowledge_base_ids: …,
       knowledge_ids: …,
       limit: 6,
-      signal: suggestionsAbort.signal,               // NEU
+      signal: suggestionsAbort.signal,               // NEW
     })
     // ...
   } catch (err) {
-    if (err.name === 'AbortError') return            // NEU
-    // ... bestehender Catch-Path
+    if (err.name === 'AbortError') return            // NEW
+    // ... existing catch path
   }
 }
 ```
-🛡️ **No-Regression-Check:** `getSuggestedQuestions` muss `signal` an axios durchreichen — kleine API-Erweiterung, kein Breaking-Change.
+🛡️ **No-regression check:** `getSuggestedQuestions` must forward `signal` to axios — small API extension, no breaking change.
 
 ---
 
-## ZUSAMMENFASSUNG
+## SUMMARY
 
-- **Critical-Findings adressiert (1–10):** CORS, Slack-Bypass, Compose-Defaults, Encryption-Key, curl-pipe, JWT-Storage, asyncio.run, mutable defaults, resource limits, SQL-Templates.
-- **High-Findings adressiert (11–20):** ShouldBindJSON, math/rand, Reranker-Timeout, WeChat-SSRF, KB-Clone-Logging, GH-Action-Pin, image-pin, migrate.sh-Logging, deep-watcher, context.Background.
-- **Medium/Restliche (21–40):** Marshal/Unmarshal-Errors, Body.Close-Defers, file.Close-Logging, DNS-Ctx, v-html-Sanitization, Stream-Abort beim Route-Leave, Polling-Timer, subprocess-Timeout, print→logger, except-Refactor, rel-Attribute, .catch-Logging, set-euo, PEP585-Typings, Healthchecks, env-Drift, USER-direktive, AbortController.
+- **Critical findings addressed (1–10):** CORS, Slack bypass, compose defaults, encryption key, curl-pipe, JWT storage, asyncio.run, mutable defaults, resource limits, SQL templates.
+- **High findings addressed (11–20):** ShouldBindJSON, math/rand, reranker timeout, WeChat SSRF, KB clone logging, GitHub Action pin, image pin, migrate.sh logging, deep watcher, context.Background.
+- **Medium / remaining (21–40):** Marshal/unmarshal errors, Body.Close defers, file.Close logging, DNS ctx, v-html sanitization, stream abort on route leave, polling timer, subprocess timeout, print → logger, except refactor, rel attributes, .catch logging, set-euo, PEP585 typings, healthchecks, env drift, USER directive, AbortController.
 
-**Verbleibend für separate Tickets** (zu groß für minimal-invasive Patches):
-- HTTP-only-Cookies für JWT (Backend + Frontend Roundtrip).
-- Vereinheitlichte IM-Webhook-Verifikation hinter gemeinsamem Interface.
-- `defusedxml` im DocReader.
-- `setupTLS` mit `mTLS` zwischen App und DocReader.
-- Distroless-Migration der Runtime-Images.
+**Remaining for separate tickets** (too large for minimal-invasive patches):
+- HTTP-only cookies for JWT (backend + frontend roundtrip).
+- Unified IM webhook verification behind a common interface.
+- `defusedxml` in DocReader.
+- `setupTLS` with `mTLS` between app and DocReader.
+- Distroless migration of runtime images.
 
-*Erstellt 2026-05-06. Patches sind Vorschläge — vor Merge pro Datei manuell verifizieren und Tests schreiben.*
+*Created 2026-05-06. Patches are proposals — verify per file manually and write tests before merge.*
+
+---
+
+## ADDITIONAL CRITICAL FIXES (Follow-up audit)
+
+### 🔴 Problem 41: AES-128-ECB for WeChat media files
+🔍 **Root cause:** ECB encrypts every 16-byte block independently with the same key, leaking patterns; PKCS#7 unpadding additionally exits early on byte mismatch (padding-oracle vector).
+✅ **Fix strategy:** Replace with AES-GCM (AEAD, random IV per blob) where the WeKnora side controls both encrypt and decrypt. If the iLink wire-protocol *forces* ECB on egress, isolate that one direction and switch the local cache layer to GCM. Constant-time padding check in either case.
+💻 **Code change** — `internal/im/wechat/crypto.go` (replace both functions)
+```go
+// CHANGED: AES-GCM replaces AES-128-ECB
+import (
+    "crypto/aes"
+    "crypto/cipher"   // NEW
+    "crypto/rand"     // NEW
+    "crypto/subtle"   // NEW (constant-time padding check, fallback path only)
+    "fmt"
+    "io"              // NEW
+)
+
+func encryptAESGCM(plaintext, key []byte) ([]byte, error) { // CHANGED
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        return nil, fmt.Errorf("new aes cipher: %w", err)
+    }
+    gcm, err := cipher.NewGCM(block)                         // NEW
+    if err != nil {                                          // NEW
+        return nil, err                                      // NEW
+    }                                                        // NEW
+    nonce := make([]byte, gcm.NonceSize())                   // NEW
+    if _, err := io.ReadFull(rand.Reader, nonce); err != nil { // NEW
+        return nil, err                                      // NEW
+    }                                                        // NEW
+    return gcm.Seal(nonce, nonce, plaintext, nil), nil       // NEW
+}
+
+func decryptAESGCM(ciphertext, key []byte) ([]byte, error) { // CHANGED
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        return nil, fmt.Errorf("new aes cipher: %w", err)
+    }
+    gcm, err := cipher.NewGCM(block)                         // NEW
+    if err != nil {                                          // NEW
+        return nil, err                                      // NEW
+    }                                                        // NEW
+    if len(ciphertext) < gcm.NonceSize() {                   // NEW
+        return nil, fmt.Errorf("ciphertext too short")       // NEW
+    }                                                        // NEW
+    return gcm.Open(nil, ciphertext[:gcm.NonceSize()], ciphertext[gcm.NonceSize():], nil) // NEW
+}
+```
+**If iLink mandates ECB on egress** — keep ECB only as `decryptIlinkLegacy`, fix the unpadding to constant-time:
+```go
+// CHANGED: replace the if-break loop with subtle.ConstantTimeCompare
+expected := bytes.Repeat([]byte{byte(padLen)}, padLen)                                 // NEW
+if subtle.ConstantTimeCompare(plaintext[len(plaintext)-padLen:], expected) == 1 {     // NEW
+    plaintext = plaintext[:len(plaintext)-padLen]                                     // NEW
+}                                                                                     // NEW
+```
+🛡️ **No-regression check:** GCM ciphertext is non-compatible with ECB; this needs coordinated rollout (re-encrypt at rest or version-prefix). Adapter call sites at `internal/im/wechat/adapter.go:155-200` need the `Open(...)` signature shift. If the iLink CDN strictly returns ECB, only the *outbound* path (uploads) can move to GCM unilaterally.
+
+---
+
+### 🔴 Problem 42: OIDC nonce never validated
+🔍 **Root cause:** `decodeOIDCState` only parses base64+JSON and checks `RedirectURI` non-empty — the `Nonce` field is parsed but never compared against any server-side store.
+✅ **Fix strategy:** Bind the nonce to the user's browser session via an HTTP-only, SameSite=Strict cookie set in `/oidc/start`. Compare in `OIDCRedirectCallback` and reject on mismatch. No refactor of the user-service login flow.
+💻 **Code change 1** — start endpoint (in same file as `OIDCRedirectCallback`, where the state is *issued*; if not present, add to `auth.go`):
+```go
+// At the OIDC start endpoint:
+nonce := generateRandomNonce()                                           // NEW (helper using crypto/rand)
+c.SetCookie("oidc_nonce", nonce, 600 /*10 min*/, "/", "", true, true)    // NEW (Secure, HttpOnly)
+c.SetSameSite(http.SameSiteStrictMode)                                   // NEW
+state := encodeOIDCState(&oidcStatePayload{Nonce: nonce, RedirectURI: redirectURI}) // existing call
+```
+💻 **Code change 2** — `internal/handler/auth.go:243-257`
+```go
+state := strings.TrimSpace(c.Query("state"))
+decodedState, err := decodeOIDCState(state)
+if err != nil {
+    logger.Errorf(ctx, "Failed to decode OIDC state: %v", err)
+    c.Redirect(http.StatusFound, frontendRedirectURI+"#oidc_error="+urlQueryEscape("invalid_state"))
+    return
+}
+
+// NEW: nonce must match the cookie issued at /oidc/start
+cookieNonce, _ := c.Cookie("oidc_nonce")                                   // NEW
+if cookieNonce == "" || subtle.ConstantTimeCompare([]byte(cookieNonce),   // NEW
+    []byte(decodedState.Nonce)) != 1 {                                     // NEW
+    logger.Errorf(ctx, "OIDC nonce mismatch")                              // NEW
+    c.Redirect(http.StatusFound, frontendRedirectURI+"#oidc_error="+urlQueryEscape("nonce_mismatch")) // NEW
+    return                                                                 // NEW
+}                                                                          // NEW
+c.SetCookie("oidc_nonce", "", -1, "/", "", true, true)                     // NEW (clear cookie)
+```
+🛡️ **No-regression check:** Existing in-flight OIDC flows (state issued before deploy) will fail once — acceptable security trade-off. Add `crypto/subtle` import; the helper `generateRandomNonce` should call `crypto/rand`, NOT `math/rand` (see Problem 45).
+
+---
+
+### 🔴 Problem 43: `TENANT_AES_KEY` panics on misconfiguration
+🔍 **Root cause:** `apiKeySecret()` returns raw env bytes; `aes.NewCipher` panics on lengths other than 16/24/32, killing the request goroutine.
+✅ **Fix strategy:** Validate length at startup, fail fast with a clear error message. Mirror the pattern from `utils.GetAESKey()` (`internal/utils/crypto.go:19-25`) which returns `nil` for invalid lengths.
+💻 **Code change** — `internal/application/service/tenant.go:23-25`
+```go
+var apiKeySecret = func() []byte {                                        // CHANGED
+    key := []byte(os.Getenv("TENANT_AES_KEY"))                            // CHANGED
+    switch len(key) {                                                     // NEW
+    case 16, 24, 32:                                                      // NEW
+        return key                                                        // NEW
+    case 0:                                                               // NEW
+        panic("TENANT_AES_KEY environment variable is required (16/24/32 bytes)") // NEW
+    default:                                                              // NEW
+        panic(fmt.Sprintf("TENANT_AES_KEY length %d invalid (must be 16/24/32 bytes)", len(key))) // NEW
+    }                                                                     // NEW
+}                                                                         // CHANGED
+```
+**Plus** — call this once at startup so the panic is at boot, not at first request:
+```go
+// In cmd/server/main.go, near other config validation:
+_ = service.MustValidateTenantAESKey()   // NEW (small wrapper that calls apiKeySecret() during init)
+```
+🛡️ **No-regression check:** Servers that booted with an invalid key were already hitting the panic on first user-create — this just moves the failure forward in time. Operator gets a clear error message instead of a confusing stack trace at a random later moment.
+
+---
+
+### 🔴 Problem 44: Init migrations `DROP TABLE` user data unconditionally
+🔍 **Root cause:** The `00-init-db.sql` (MySQL) and `000000_init` family begin with `DROP TABLE IF EXISTS …` for seven user-data tables; running the init step on a populated DB wipes everything irreversibly.
+✅ **Fix strategy:** Remove the `DROP TABLE` lines from the up-migration; rely on `CREATE TABLE IF NOT EXISTS` (already implicit for the up-path). Move the destructive cleanup into a separate, opt-in `reset/`-flagged path.
+💻 **Code change 1** — `migrations/mysql/00-init-db.sql:1-7`
+```sql
+-- REMOVE these 7 lines:
+-- DROP TABLE IF EXISTS tenants;
+-- DROP TABLE IF EXISTS models;
+-- DROP TABLE IF EXISTS knowledge_bases;
+-- DROP TABLE IF EXISTS knowledges;
+-- DROP TABLE IF EXISTS sessions;
+-- DROP TABLE IF EXISTS messages;
+-- DROP TABLE IF EXISTS chunks;
+
+CREATE TABLE IF NOT EXISTS tenants (   -- CHANGED: add IF NOT EXISTS
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    -- ... unchanged
+);
+-- repeat the IF NOT EXISTS guard on each remaining CREATE TABLE
+```
+💻 **Code change 2** — extract cleanup into `migrations/reset/00-drop-all.sql` (NEW file), gated by an explicit operator command:
+```sql
+-- NEW FILE: migrations/reset/00-drop-all.sql
+-- DANGEROUS: only run via `make db-reset CONFIRM=YES` — never by accident.
+DROP TABLE IF EXISTS chunks;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS knowledges;
+DROP TABLE IF EXISTS knowledge_bases;
+DROP TABLE IF EXISTS models;
+DROP TABLE IF EXISTS tenants;
+```
+And in `Makefile`:
+```make
+db-reset:                                                                 # NEW
+ifndef CONFIRM                                                            # NEW
+	@echo "Refusing to drop tables without CONFIRM=YES"                  # NEW
+	@exit 1                                                              # NEW
+endif                                                                     # NEW
+	@./scripts/migrate.sh apply migrations/reset/00-drop-all.sql         # NEW
+```
+🛡️ **No-regression check:** Fresh installs still work because tables don't exist yet → `CREATE TABLE IF NOT EXISTS` succeeds. Existing databases are now safe from accidental wipe via re-running the init migration. `migrate force 0` is a separate concern — document it as DEV-only.
+
+---
+
+### 🔴 Problem 45: `signer.go` uses `math/rand` for nonce + MD5 for signature
+🔍 **Root cause:** Two compounding crypto mistakes — predictable nonces (via `math/rand`) plus collision-vulnerable hash (MD5) — together defeat the integrity guarantee.
+✅ **Fix strategy:** Replace nonce source with `crypto/rand` (always safe). For the hash, MD5 is wire-mandated by WeKnoraCloud upstream — keep it but document the limitation. The nonce fix alone restores replay protection.
+💻 **Code change** — `internal/models/utils/signer.go:1-12, 71-77`
+```go
+import (
+    "bytes"
+    "crypto/md5"            // unchanged (upstream-mandated)
+    "crypto/rand"           // NEW
+    "encoding/binary"       // NEW
+    "fmt"
+    // REMOVE: "math/rand"
+    "sort"
+    "strconv"
+    "strings"
+    "time"
+)
+
+// CHANGED: cryptographically secure nonce
+func generateNonce(length int) string {
+    b := make([]byte, length)                                              // unchanged
+    for i := range b {                                                     // CHANGED
+        var idx [1]byte                                                    // NEW
+        if _, err := rand.Read(idx[:]); err != nil {                       // NEW
+            // crypto/rand on a sane OS never fails; if it does, panic is the only safe option
+            panic(fmt.Errorf("crypto/rand failed: %w", err))               // NEW
+        }                                                                  // NEW
+        b[i] = nonceChars[int(idx[0])%len(nonceChars)]                     // CHANGED
+    }
+    return string(b)
+}
+```
+*(`encoding/binary` is imported in case future code uses `binary.LittleEndian.Uint32(...)` for index derivation; can be omitted if only the byte-modulo form above is used.)*
+
+🛡️ **No-regression check:** Signature shape and length are unchanged — wire-compatible with the upstream API. `crypto/rand` reading 1 byte per char is fast (~16 calls per signature; modern OS RNGs handle millions/sec). MD5 is left as-is intentionally because WeKnoraCloud's verification side does the same; flagging that limitation as a separate vendor-side ticket.
+
+---
+
+## UPDATED SUMMARY
+
+- **Critical findings now addressed (1–10, 41–45):** original 10 + WeChat ECB, OIDC nonce, TENANT_AES_KEY validation, init-migration drop, signer nonce/MD5.
+- **Total resolutions:** 45.
+- **Remaining for separate tickets:** as before, plus: WeKnoraCloud upstream MD5 (vendor coordination), iLink CDN ECB protocol (vendor coordination — only WeKnora-side mitigation possible).
