@@ -50,6 +50,20 @@ func envDurationDefault(key string, def time.Duration) time.Duration {
 	return parsed
 }
 
+// envIntDefault returns the integer env var or def when unset / invalid /
+// negative. Used for tunables like WEKNORA_QG_CONCURRENCY.
+func envIntDefault(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
 // Per-task timeouts.
 //
 // Without these, asynq's default 30-minute task timeout applies to every

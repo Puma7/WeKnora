@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
@@ -27,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 func (s *knowledgeService) cloneKnowledge(
@@ -830,6 +832,14 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 		return nil
 	}
 
+	// Idempotency: a retry of an orphaned-and-requeued summary task could
+	// re-run the entire LLM pipeline against an already-summarised
+	// knowledge. Bail out if SummaryStatus is already terminal.
+	if knowledge.SummaryStatus == types.SummaryStatusCompleted {
+		logger.Infof(ctx, "Summary already completed for %s, skipping", payload.KnowledgeID)
+		return nil
+	}
+
 	// Update summary status to processing
 	knowledge.SummaryStatus = types.SummaryStatusProcessing
 	knowledge.UpdatedAt = time.Now()
@@ -1174,94 +1184,188 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		logger.Warnf(ctx, "Failed to set initial AIGS progress: %v", err)
 	}
 
-	// Generate questions for each chunk with context
-	var indexInfoList []*types.IndexInfo
+	// Pre-pass: classify each chunk as either
+	//   - skip (empty content),
+	//   - already-fully-done (questions present + already indexed) → no LLM, no re-index,
+	//   - questions-only-need-indexing (questions present but QuestionsIndexedAt == 0,
+	//     e.g. previous BatchIndex failed and the task got retried) → reuse existing
+	//     questions, just add to indexInfoList,
+	//   - todo (run LLM).
+	//
+	// Without this idempotency check, every retry of an exhausted task
+	// regenerates ALL questions and writes duplicate index entries.
+	type qgWorkItem struct {
+		i           int
+		chunk       *types.Chunk
+		prev        string
+		next        string
+		needsLLM    bool
+		needsIndex  bool
+		needsTouch  bool // whether to mark QuestionsIndexedAt after batch index
+		preExisting []types.GeneratedQuestion
+	}
+	work := make([]*qgWorkItem, 0, len(textChunks))
+	skippedAlreadyDone := 0
 	for i, chunk := range textChunks {
 		if strings.TrimSpace(chunk.Content) == "" {
 			emptyContentChunks++
 			continue
 		}
-
-		// Build context from adjacent chunks
-		var prevContent, nextContent string
+		existingMeta, _ := chunk.DocumentMetadata()
+		hasEnoughQuestions := existingMeta != nil && len(existingMeta.GeneratedQuestions) >= questionCount
+		alreadyIndexed := existingMeta != nil && existingMeta.QuestionsIndexedAt > 0
+		if hasEnoughQuestions && alreadyIndexed {
+			skippedAlreadyDone++
+			continue
+		}
+		var prev, next string
 		if i > 0 {
-			prevContent = enrichContent(textChunks[i-1])
+			prev = enrichContent(textChunks[i-1])
 		}
 		if i < len(textChunks)-1 {
-			nextContent = enrichContent(textChunks[i+1])
+			next = enrichContent(textChunks[i+1])
 		}
-
-		llmCallAttempts++
-		questions, err := s.generateQuestionsWithContext(ctx, chatModel, enrichContent(chunk), prevContent, nextContent, knowledge.Title, questionCount)
-		if err != nil {
-			llmCallFailed++
-			logger.Warnf(ctx, "Failed to generate questions for chunk %s: %v", chunk.ID, err)
-			continue
+		item := &qgWorkItem{i: i, chunk: chunk, prev: prev, next: next}
+		if hasEnoughQuestions {
+			// Reuse existing questions; just need to (re-)index them.
+			item.preExisting = existingMeta.GeneratedQuestions
+			item.needsIndex = true
+			item.needsTouch = true
+		} else {
+			item.needsLLM = true
+			item.needsIndex = true
+			item.needsTouch = true
 		}
-
-		if len(questions) == 0 {
-			llmCallEmpty++
-			continue
-		}
-		llmCallSuccess++
-		generatedQuestionsTotal += len(questions)
-
-		// Update chunk metadata with unique IDs for each question
-		generatedQuestions := make([]types.GeneratedQuestion, len(questions))
-		for j, question := range questions {
-			questionID := fmt.Sprintf("q%d", time.Now().UnixNano()+int64(j))
-			generatedQuestions[j] = types.GeneratedQuestion{
-				ID:       questionID,
-				Question: question,
-			}
-		}
-		meta := &types.DocumentChunkMetadata{
-			GeneratedQuestions: generatedQuestions,
-		}
-		if err := chunk.SetDocumentMetadata(meta); err != nil {
-			chunkMetadataSetFailed++
-			logger.Warnf(ctx, "Failed to set document metadata for chunk %s: %v", chunk.ID, err)
-			continue
-		}
-
-		// Update chunk in database
-		if err := s.chunkService.UpdateChunk(ctx, chunk); err != nil {
-			chunkUpdateFailed++
-			logger.Warnf(ctx, "Failed to update chunk %s: %v", chunk.ID, err)
-			continue
-		}
-
-		// Create index entries for generated questions
-		for _, gq := range generatedQuestions {
-			sourceID := fmt.Sprintf("%s-%s", chunk.ID, gq.ID)
-			indexInfoList = append(indexInfoList, &types.IndexInfo{
-				Content:         gq.Question,
-				SourceID:        sourceID,
-				SourceType:      types.ChunkSourceType,
-				ChunkID:         chunk.ID,
-				KnowledgeID:     knowledge.ID,
-				KnowledgeBaseID: knowledge.KnowledgeBaseID,
-				IsEnabled:       true,
-			})
-		}
-		logger.Debugf(ctx, "Generated %d questions for chunk %s", len(questions), chunk.ID)
-
-		// Heartbeat + progress every 50 chunks. Keeps the row out of the
-		// reconciler's "stuck" set during long QG runs and gives the UI a
-		// live counter.
-		if (i+1)%50 == 0 {
-			if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, i+1, len(textChunks)); err != nil {
-				logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", i+1, err)
-			}
-			if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
-				logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", i+1, err)
-			}
-		}
+		work = append(work, item)
 	}
+	if skippedAlreadyDone > 0 {
+		logger.Infof(ctx, "[QG] Skipping %d chunks already fully done (idempotent retry)", skippedAlreadyDone)
+	}
+
+	// Run the LLM phase in bounded parallelism. Each task is independent
+	// (its prompt was prepared in the pre-pass), so we can parallelize
+	// up to WEKNORA_QG_CONCURRENCY at the LLM provider. On a single Ollama
+	// instance, set OLLAMA_NUM_PARALLEL accordingly.
+	concurrency := envIntDefault("WEKNORA_QG_CONCURRENCY", 4)
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	var (
+		mu             sync.Mutex
+		indexInfoList  []*types.IndexInfo
+		touchedChunks  []*types.Chunk // chunks whose metadata was updated and should get QuestionsIndexedAt set after BatchIndex
+		processedCount int
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
+	for _, item := range work {
+		item := item
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return nil
+			}
+			var generatedQuestions []types.GeneratedQuestion
+			if item.needsLLM {
+				mu.Lock()
+				llmCallAttempts++
+				mu.Unlock()
+				questions, err := s.generateQuestionsWithContext(
+					gctx, chatModel, enrichContent(item.chunk),
+					item.prev, item.next, knowledge.Title, questionCount,
+				)
+				if err != nil {
+					mu.Lock()
+					llmCallFailed++
+					mu.Unlock()
+					logger.Warnf(gctx, "Failed to generate questions for chunk %s: %v", item.chunk.ID, err)
+					return nil // Don't fail siblings on a single chunk error
+				}
+				if len(questions) == 0 {
+					mu.Lock()
+					llmCallEmpty++
+					mu.Unlock()
+					return nil
+				}
+				generatedQuestions = make([]types.GeneratedQuestion, len(questions))
+				for j, q := range questions {
+					generatedQuestions[j] = types.GeneratedQuestion{
+						ID:       fmt.Sprintf("q%d", time.Now().UnixNano()+int64(j)),
+						Question: q,
+					}
+				}
+				meta := &types.DocumentChunkMetadata{GeneratedQuestions: generatedQuestions}
+				if err := item.chunk.SetDocumentMetadata(meta); err != nil {
+					mu.Lock()
+					chunkMetadataSetFailed++
+					mu.Unlock()
+					logger.Warnf(gctx, "Failed to set document metadata for chunk %s: %v", item.chunk.ID, err)
+					return nil
+				}
+				if err := s.chunkService.UpdateChunk(gctx, item.chunk); err != nil {
+					mu.Lock()
+					chunkUpdateFailed++
+					mu.Unlock()
+					logger.Warnf(gctx, "Failed to update chunk %s: %v", item.chunk.ID, err)
+					return nil
+				}
+				mu.Lock()
+				llmCallSuccess++
+				generatedQuestionsTotal += len(generatedQuestions)
+				mu.Unlock()
+			} else {
+				generatedQuestions = item.preExisting
+			}
+
+			// Build index entries for this chunk's questions.
+			entries := make([]*types.IndexInfo, 0, len(generatedQuestions))
+			for _, gq := range generatedQuestions {
+				entries = append(entries, &types.IndexInfo{
+					Content:         gq.Question,
+					SourceID:        fmt.Sprintf("%s-%s", item.chunk.ID, gq.ID),
+					SourceType:      types.ChunkSourceType,
+					ChunkID:         item.chunk.ID,
+					KnowledgeID:     knowledge.ID,
+					KnowledgeBaseID: knowledge.KnowledgeBaseID,
+					IsEnabled:       true,
+				})
+			}
+			mu.Lock()
+			indexInfoList = append(indexInfoList, entries...)
+			if item.needsTouch {
+				touchedChunks = append(touchedChunks, item.chunk)
+			}
+			processedCount++
+			localProgress := processedCount
+			mu.Unlock()
+
+			// Heartbeat / progress every 50 processed items. Localprogress
+			// is taken under lock so we get a real "n out of total" — not
+			// an out-of-order view.
+			if localProgress%50 == 0 {
+				if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, localProgress, len(work)); err != nil {
+					logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", localProgress, err)
+				}
+				if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
+					logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", localProgress, err)
+				}
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
 	indexEntriesPrepared = len(indexInfoList)
-	// Final progress update so the row is exactly chunks_done == total.
+	// Final progress update so the row matches the planned total even
+	// when some items hit per-chunk errors and didn't increment.
 	if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, len(textChunks), len(textChunks)); err != nil {
 		logger.Warnf(ctx, "Failed to finalize AIGS progress: %v", err)
+	}
+
+	// Bail out if too many chunks failed: re-running the task is cheaper
+	// than producing a half-indexed knowledge.
+	if llmCallAttempts > 0 && llmCallFailed*10 > llmCallAttempts {
+		exitStatus = "too_many_llm_failures"
+		return fmt.Errorf("too many LLM failures: %d/%d", llmCallFailed, llmCallAttempts)
 	}
 
 	// Index generated questions
@@ -1274,6 +1378,24 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		}
 		indexBatchSucceeded = true
 		logger.Infof(ctx, "Successfully indexed %d generated questions for knowledge: %s", len(indexInfoList), payload.KnowledgeID)
+
+		// Mark all touched chunks as fully indexed so a future retry
+		// short-circuits in the pre-pass.
+		nowTS := time.Now().Unix()
+		for _, c := range touchedChunks {
+			meta, _ := c.DocumentMetadata()
+			if meta == nil {
+				continue
+			}
+			meta.QuestionsIndexedAt = nowTS
+			if err := c.SetDocumentMetadata(meta); err != nil {
+				logger.Warnf(ctx, "Failed to stamp QuestionsIndexedAt on chunk %s: %v", c.ID, err)
+				continue
+			}
+			if err := s.chunkService.UpdateChunk(ctx, c); err != nil {
+				logger.Warnf(ctx, "Failed to persist QuestionsIndexedAt for chunk %s: %v", c.ID, err)
+			}
+		}
 	}
 
 	return nil
