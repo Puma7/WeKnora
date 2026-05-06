@@ -219,6 +219,13 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		return
 	}
 
+	// Heartbeat updated_at while processing so a future watchdog can tell
+	// active long-running ingests apart from genuinely wedged workers. The
+	// goroutine writes a single column (no parse_status stomp) and exits
+	// when the deferred cancel runs at function return.
+	stopHeartbeat := s.startProcessingHeartbeat(ctx, knowledge.ID)
+	defer stopHeartbeat()
+
 	// Get embedding model for vectorization — only needed when vector/keyword indexing is enabled
 	var embeddingModel embedding.Embedder
 	if kb.NeedsEmbeddingModel() {
@@ -2421,4 +2428,29 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 			logger.Infof(ctx, "Enqueued image:multimodal task for %s", img.ServingURL)
 		}
 	}
+}
+
+// startProcessingHeartbeat ticks knowledge.updated_at every minute so a
+// watchdog can distinguish active long-running ingests from wedged workers.
+// Returns a cancel func that the caller must invoke (typically via defer)
+// to stop the goroutine before processChunks returns. Uses a detached
+// context so that ctx cancellation on the request side does not race with
+// the final terminal-status write — the cancel func is the source of truth.
+func (s *knowledgeService) startProcessingHeartbeat(ctx context.Context, knowledgeID string) func() {
+	hbCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				if err := s.repo.UpdateKnowledgeColumn(hbCtx, knowledgeID, "updated_at", time.Now()); err != nil {
+					logger.Warnf(ctx, "heartbeat updated_at write failed for %s: %v", knowledgeID, err)
+				}
+			}
+		}
+	}()
+	return cancel
 }
