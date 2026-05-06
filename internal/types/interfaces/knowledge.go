@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"mime/multipart"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
@@ -204,6 +205,11 @@ type KnowledgeRepository interface {
 	// AminusB returns the difference set of A and B.
 	AminusB(ctx context.Context, Atenant uint64, A string, Btenant uint64, B string) ([]string, error)
 	UpdateKnowledgeColumn(ctx context.Context, id string, column string, value interface{}) error
+	// FindStuckProcessing returns up to limit knowledge items that have been
+	// in 'processing' status with no updated_at touch newer than threshold.
+	// Used by the watchdog as a pure observability signal — callers do not
+	// mutate the returned rows.
+	FindStuckProcessing(ctx context.Context, threshold time.Duration, limit int) ([]*types.Knowledge, error)
 	// CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base.
 	CountKnowledgeByKnowledgeBaseID(ctx context.Context, tenantID uint64, kbID string) (int64, error)
 	// CountKnowledgeByStatus counts the number of knowledge items with the specified parse status.
