@@ -639,25 +639,27 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
 
 	// Resolve rerank model in order: KB/RetrievalConfig override → tenant
 	// default (Model.IsDefault on a rerank model) → first available rerank
-	// model. The tenant-default tier brings reranker behaviour in line with
-	// embedding/LLM, which already honour Model.IsDefault.
-	var tenantDefaultRerankID string
-	if tenantID, ok := types.TenantIDFromContext(ctx); ok {
-		if id, lookupErr := s.modelService.GetTenantDefaultRerankModelID(ctx, uint(tenantID)); lookupErr != nil {
-			logger.Warnf(ctx, "Failed to look up tenant default rerank model: %v", lookupErr)
-		} else {
-			tenantDefaultRerankID = id
-		}
-	}
-	chatManage.RerankModelID = rc.GetEffectiveRerankModelID(tenantDefaultRerankID)
-	if chatManage.RerankModelID == "" {
-		for _, model := range models {
-			if model == nil {
-				continue
+	// model. We only hit the tenant-default DB lookup when the per-config
+	// override is empty — otherwise the result would be discarded anyway.
+	if rc != nil && rc.RerankModelID != "" {
+		chatManage.RerankModelID = rc.RerankModelID
+	} else {
+		if tenantID, ok := types.TenantIDFromContext(ctx); ok {
+			if id, lookupErr := s.modelService.GetTenantDefaultRerankModelID(ctx, uint(tenantID)); lookupErr != nil {
+				logger.Warnf(ctx, "Failed to look up tenant default rerank model: %v", lookupErr)
+			} else {
+				chatManage.RerankModelID = id
 			}
-			if model.Type == types.ModelTypeRerank {
-				chatManage.RerankModelID = model.ID
-				break
+		}
+		if chatManage.RerankModelID == "" {
+			for _, model := range models {
+				if model == nil {
+					continue
+				}
+				if model.Type == types.ModelTypeRerank {
+					chatManage.RerankModelID = model.ID
+					break
+				}
 			}
 		}
 	}

@@ -618,19 +618,23 @@ func (s *messageService) rerankResults(ctx context.Context, rc *types.RetrievalC
 		return results
 	}
 
-	// Resolve effective rerank model ID: KB/config override wins; otherwise
-	// fall back to the tenant-level default model. A DB error on the default
-	// lookup is non-fatal — we just behave as if no default exists and skip
-	// reranking, matching the pre-fallback behaviour.
-	var defaultID string
-	if tenantID, ok := types.TenantIDFromContext(ctx); ok {
-		if id, err := s.modelService.GetTenantDefaultRerankModelID(ctx, uint(tenantID)); err != nil {
-			logger.Warnf(ctx, "Failed to look up tenant default rerank model: %v", err)
-		} else {
-			defaultID = id
+	// Resolve effective rerank model ID: KB/config override wins; only when
+	// it is empty do we hit the DB for the tenant-level default. Searching
+	// is a hot path — running an extra read on every call when the override
+	// is set would burn DB connections for no behaviour change.
+	modelID := ""
+	if rc != nil {
+		modelID = rc.RerankModelID
+	}
+	if modelID == "" {
+		if tenantID, ok := types.TenantIDFromContext(ctx); ok {
+			if id, err := s.modelService.GetTenantDefaultRerankModelID(ctx, uint(tenantID)); err != nil {
+				logger.Warnf(ctx, "Failed to look up tenant default rerank model: %v", err)
+			} else {
+				modelID = id
+			}
 		}
 	}
-	modelID := rc.GetEffectiveRerankModelID(defaultID)
 	if modelID == "" {
 		return results
 	}

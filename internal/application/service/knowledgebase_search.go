@@ -94,10 +94,11 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	logger.Infof(ctx, "Hybrid search parameters, knowledge base IDs: %v, query text: %s", searchKBIDs, params.QueryText)
 
 	tenantInfo, _ := types.TenantInfoFromContext(ctx)
-	var retrievalCfg *types.RetrievalConfig
-	if tenantInfo != nil {
-		retrievalCfg = tenantInfo.RetrievalConfig
-	}
+	// HybridSearch is invariant-protected at the route layer: every
+	// authenticated request has a tenant in context. We assume non-nil here
+	// (matching the existing GetEffectiveEngines call below) rather than
+	// pretending a half-defensive nil-check is meaningful.
+	retrievalCfg := tenantInfo.RetrievalConfig
 
 	// Create a composite retrieval engine with tenant's configured retrievers
 	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
