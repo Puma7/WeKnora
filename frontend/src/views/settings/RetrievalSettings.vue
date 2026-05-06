@@ -98,12 +98,60 @@
           @change="handleParamChange"
         />
       </div>
+
+      <!-- RRF k -->
+      <div class="setting-item">
+        <div class="setting-label-row">
+          <span>{{ t('retrievalSettings.rrfKLabel') }}</span>
+          <span class="value-display">{{ rrfK }}</span>
+        </div>
+        <p class="setting-desc">{{ t('retrievalSettings.rrfKDescription') }}</p>
+        <t-slider
+          v-model="rrfK"
+          :min="30"
+          :max="100"
+          :step="1"
+          @change="handleParamChange"
+        />
+      </div>
+
+      <!-- RRF Vector Weight -->
+      <div class="setting-item">
+        <div class="setting-label-row">
+          <span>{{ t('retrievalSettings.rrfVectorWeightLabel') }}</span>
+          <span class="value-display">{{ rrfVectorWeight.toFixed(2) }}</span>
+        </div>
+        <p class="setting-desc">{{ t('retrievalSettings.rrfVectorWeightDescription') }}</p>
+        <t-slider
+          v-model="rrfVectorWeight"
+          :min="0"
+          :max="1"
+          :step="0.05"
+          @change="handleParamChange"
+        />
+      </div>
+
+      <!-- RRF Keyword Weight -->
+      <div class="setting-item">
+        <div class="setting-label-row">
+          <span>{{ t('retrievalSettings.rrfKeywordWeightLabel') }}</span>
+          <span class="value-display">{{ rrfKeywordWeight.toFixed(2) }}</span>
+        </div>
+        <p class="setting-desc">{{ t('retrievalSettings.rrfKeywordWeightDescription') }}</p>
+        <t-slider
+          v-model="rrfKeywordWeight"
+          :min="0"
+          :max="1"
+          :step="0.05"
+          @change="handleParamChange"
+        />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive, onMounted, nextTick } from 'vue'
+import { reactive, onMounted, nextTick, computed } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import ModelSelector from '@/components/ModelSelector.vue'
@@ -115,6 +163,11 @@ import {
 
 const { t } = useI18n()
 
+// Backend defaults — see internal/types/retrieval_config.go
+const RRF_K_DEFAULT = 60
+const RRF_VECTOR_WEIGHT_DEFAULT = 0.7
+const RRF_KEYWORD_WEIGHT_DEFAULT = 0.3
+
 const defaultConfig: RetrievalConfig = {
   embedding_top_k: 50,
   vector_threshold: 0.15,
@@ -122,11 +175,30 @@ const defaultConfig: RetrievalConfig = {
   rerank_top_k: 10,
   rerank_threshold: 0.2,
   rerank_model_id: '',
+  rrf_k: RRF_K_DEFAULT,
+  rrf_vector_weight: RRF_VECTOR_WEIGHT_DEFAULT,
+  rrf_keyword_weight: RRF_KEYWORD_WEIGHT_DEFAULT,
 }
 
 const localConfig = reactive<RetrievalConfig>({ ...defaultConfig })
 let initialConfig: RetrievalConfig = { ...defaultConfig }
 let isInitializing = true
+
+// Computed proxies expose non-undefined numbers to t-slider while keeping
+// the API contract optional. Setters write directly to localConfig so the
+// debounced save picks up the change.
+const rrfK = computed<number>({
+  get: () => localConfig.rrf_k ?? RRF_K_DEFAULT,
+  set: (v) => { localConfig.rrf_k = v },
+})
+const rrfVectorWeight = computed<number>({
+  get: () => localConfig.rrf_vector_weight ?? RRF_VECTOR_WEIGHT_DEFAULT,
+  set: (v) => { localConfig.rrf_vector_weight = v },
+})
+const rrfKeywordWeight = computed<number>({
+  get: () => localConfig.rrf_keyword_weight ?? RRF_KEYWORD_WEIGHT_DEFAULT,
+  set: (v) => { localConfig.rrf_keyword_weight = v },
+})
 
 const loadConfig = async () => {
   try {
@@ -140,6 +212,9 @@ const loadConfig = async () => {
         rerank_top_k: cfg.rerank_top_k || defaultConfig.rerank_top_k,
         rerank_threshold: cfg.rerank_threshold ?? defaultConfig.rerank_threshold,
         rerank_model_id: cfg.rerank_model_id || '',
+        rrf_k: cfg.rrf_k || defaultConfig.rrf_k,
+        rrf_vector_weight: cfg.rrf_vector_weight || defaultConfig.rrf_vector_weight,
+        rrf_keyword_weight: cfg.rrf_keyword_weight || defaultConfig.rrf_keyword_weight,
       })
       initialConfig = { ...localConfig }
     }

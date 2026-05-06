@@ -818,6 +818,12 @@ export default {
     rerankModelLabel: "Rerank 模型",
     rerankModelDescription: "选择用于搜索结果重排序的模型",
     rerankModelRequired: "请选择 Rerank 模型，搜索功能需要此模型对结果进行重排序",
+    rrfKLabel: "RRF 平滑常数 (k)",
+    rrfKDescription: "倒数排序融合的平滑常数，越大对头部结果的偏向越弱（默认 60，建议 30-100）",
+    rrfVectorWeightLabel: "RRF 向量权重",
+    rrfVectorWeightDescription: "RRF 融合中向量检索的权重，与关键词权重通常相加为 1（默认 0.7）",
+    rrfKeywordWeightLabel: "RRF 关键词权重",
+    rrfKeywordWeightDescription: "RRF 融合中关键词检索的权重（默认 0.3）",
     toasts: {
       saveSuccess: "检索配置已保存",
       saveFailed: "保存配置失败: {message}",

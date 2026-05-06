@@ -940,6 +940,12 @@ export default {
     rerankModelLabel: 'Rerank Model',
     rerankModelDescription: 'Select the model for reranking search results',
     rerankModelRequired: 'Please select a Rerank model. Search requires this model to rerank results.',
+    rrfKLabel: 'RRF Smoothing Constant (k)',
+    rrfKDescription: 'Reciprocal Rank Fusion smoothing constant. Higher values flatten the bias toward top results (default 60, useful range 30-100).',
+    rrfVectorWeightLabel: 'RRF Vector Weight',
+    rrfVectorWeightDescription: 'Weight applied to vector retrieval inside RRF. Usually sums with the keyword weight to 1.0 (default 0.7).',
+    rrfKeywordWeightLabel: 'RRF Keyword Weight',
+    rrfKeywordWeightDescription: 'Weight applied to keyword retrieval inside RRF (default 0.3).',
     toasts: {
       saveSuccess: 'Retrieval configuration saved',
       saveFailed: 'Failed to save configuration: {message}',
