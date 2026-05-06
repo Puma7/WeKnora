@@ -52,6 +52,12 @@ const router = createRouter({
       meta: { requiresAuth: false, requiresInit: false }
     },
     {
+      path: "/invite/:token",
+      name: "acceptInvitation",
+      component: () => import("../views/auth/AcceptInvitation.vue"),
+      meta: { requiresAuth: false, requiresInit: false }
+    },
+    {
       path: "/join",
       name: "joinOrganization",
       // 重定向到组织列表页，并将 code 参数转换为 invite_code

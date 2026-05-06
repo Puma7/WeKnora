@@ -51,6 +51,8 @@ type KnowledgeBase struct {
 	Description string `yaml:"description"             json:"description"`
 	// Tenant ID
 	TenantID uint64 `yaml:"tenant_id"               json:"tenant_id"`
+	// Owner user ID; null/empty for legacy KBs created before per-user ownership existed.
+	OwnerID string `yaml:"owner_id"                json:"owner_id,omitempty"     gorm:"type:varchar(36);column:owner_id;index"`
 	// Chunking configuration
 	ChunkingConfig ChunkingConfig `yaml:"chunking_config"         json:"chunking_config"         gorm:"type:json"`
 	// Image processing configuration

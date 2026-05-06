@@ -44,6 +44,16 @@ type UserService interface {
 	GetCurrentUser(ctx context.Context) (*types.User, error)
 	// SearchUsers searches users by username or email
 	SearchUsers(ctx context.Context, query string, limit int) ([]*types.User, error)
+	// RegistrationSettings returns the active registration mode + whitelist (env-derived).
+	RegistrationSettings(ctx context.Context) types.RegistrationSettings
+	// ListTenantUsers lists users belonging to the given tenant (admin scope).
+	ListTenantUsers(ctx context.Context, tenantID uint64, offset, limit int) ([]*types.User, int64, error)
+	// UpdateUserRole updates a user's global role; the actor must outrank the target.
+	UpdateUserRole(ctx context.Context, actor *types.User, targetUserID string, role types.UserRole) (*types.User, error)
+	// UpdateUserPermissions overrides a user's feature flags.
+	UpdateUserPermissions(ctx context.Context, actor *types.User, targetUserID string, perms types.UserPermissions) (*types.User, error)
+	// SetUserActive enables or disables a user account.
+	SetUserActive(ctx context.Context, actor *types.User, targetUserID string, active bool) (*types.User, error)
 }
 
 // UserRepository defines the user repository interface
@@ -64,8 +74,12 @@ type UserRepository interface {
 	DeleteUser(ctx context.Context, id string) error
 	// ListUsers lists users with pagination
 	ListUsers(ctx context.Context, offset, limit int) ([]*types.User, error)
+	// ListUsersByTenant lists users in a single tenant with pagination + total count.
+	ListUsersByTenant(ctx context.Context, tenantID uint64, offset, limit int) ([]*types.User, int64, error)
 	// SearchUsers searches users by username or email
 	SearchUsers(ctx context.Context, query string, limit int) ([]*types.User, error)
+	// GetUsersByIDs loads a batch of users by ID (for joining display data).
+	GetUsersByIDs(ctx context.Context, ids []string) ([]*types.User, error)
 }
 
 // AuthTokenRepository defines the auth token repository interface

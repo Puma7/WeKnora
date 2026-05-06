@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -57,88 +58,229 @@ func getJwtSecret() string {
 
 // userService implements the UserService interface
 type userService struct {
-	userRepo      interfaces.UserRepository
-	tokenRepo     interfaces.AuthTokenRepository
-	tenantService interfaces.TenantService
-	config        *config.Config
+	userRepo       interfaces.UserRepository
+	tokenRepo      interfaces.AuthTokenRepository
+	tenantService  interfaces.TenantService
+	invitationRepo interfaces.InvitationRepository
+	kbPermRepo     interfaces.KBPermissionRepository
+	config         *config.Config
 }
 
-// NewUserService creates a new user service instance
+// NewUserService creates a new user service instance.
+// invitationRepo and kbPermRepo may be nil: callers that don't wire those systems
+// get the legacy behavior (open registration only, invite tokens always rejected,
+// no KB grant application).
 func NewUserService(
 	configInfo *config.Config,
 	userRepo interfaces.UserRepository,
 	tokenRepo interfaces.AuthTokenRepository,
 	tenantService interfaces.TenantService,
+	invitationRepo interfaces.InvitationRepository,
+	kbPermRepo interfaces.KBPermissionRepository,
 ) interfaces.UserService {
 	return &userService{
-		userRepo:      userRepo,
-		tokenRepo:     tokenRepo,
-		tenantService: tenantService,
-		config:        configInfo,
+		userRepo:       userRepo,
+		tokenRepo:      tokenRepo,
+		tenantService:  tenantService,
+		invitationRepo: invitationRepo,
+		kbPermRepo:     kbPermRepo,
+		config:         configInfo,
 	}
 }
 
-// Register creates a new user account
+// RegistrationSettings returns the active env-derived settings.
+// We read on every call so admins can change env vars without restarting the binary in a dev loop;
+// in production env vars are only read at process start so this is effectively cached.
+func (s *userService) RegistrationSettings(_ context.Context) types.RegistrationSettings {
+	return types.LoadRegistrationSettingsFromEnv()
+}
+
+// HashInvitationToken converts a raw token to its storage-safe hash.
+// Defined as a package-level var so it can be reused by the invitation service.
+var HashInvitationToken = func(rawToken string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(rawToken)))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// Register creates a new user account.
+//
+// Behavior depends on the active RegistrationMode:
+//   - disabled    -> always rejected
+//   - open        -> any email accepted; new tenant created
+//   - whitelist   -> email must match REGISTRATION_EMAIL_WHITELIST OR a valid invitation token
+//   - invite_only -> a valid invitation token is required
+//
+// When an invitation token is supplied and valid, the new user is attached to the
+// inviter's tenant (instead of getting a fresh workspace), the invitation is marked
+// accepted, and any pre-grants (role, permissions, KB grants) are applied.
 func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {
 	logger.Info(ctx, "Start user registration")
 
-	// Validate input
 	if req.Username == "" || req.Email == "" || req.Password == "" {
 		return nil, errors.New("username, email and password are required")
 	}
 
-	// Check if user already exists
-	existingUser, _ := s.userRepo.GetUserByEmail(ctx, req.Email)
-	if existingUser != nil {
-		return nil, errors.New("user with this email already exists")
+	settings := s.RegistrationSettings(ctx)
+	if settings.Mode == types.RegistrationModeDisabled {
+		return nil, errors.New("registration is disabled")
 	}
 
-	existingUser, _ = s.userRepo.GetUserByUsername(ctx, req.Username)
-	if existingUser != nil {
+	emailLower := strings.ToLower(strings.TrimSpace(req.Email))
+
+	// Resolve invitation (if any) up front so we can branch consistently.
+	var invitation *types.UserInvitation
+	if strings.TrimSpace(req.InvitationToken) != "" {
+		inv, err := s.lookupInvitationByToken(ctx, req.InvitationToken)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.EqualFold(inv.Email, emailLower) {
+			return nil, errors.New("invitation does not match this email")
+		}
+		invitation = inv
+	}
+
+	// Mode-specific gating. Invitation always satisfies the gate.
+	if invitation == nil {
+		switch settings.Mode {
+		case types.RegistrationModeInviteOnly:
+			return nil, errors.New("registration requires an invitation")
+		case types.RegistrationModeWhitelist:
+			if !settings.EmailMatchesWhitelist(emailLower) {
+				return nil, errors.New("email is not on the registration whitelist")
+			}
+		}
+	}
+
+	if existing, _ := s.userRepo.GetUserByEmail(ctx, req.Email); existing != nil {
+		return nil, errors.New("user with this email already exists")
+	}
+	if existing, _ := s.userRepo.GetUserByUsername(ctx, req.Username); existing != nil {
 		return nil, errors.New("user with this username already exists")
 	}
 
-	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to hash password: %v", err)
 		return nil, errors.New("failed to process password")
 	}
 
-	// Create default tenant for the user
-	// Note: RetrieverEngines is left empty - system will use defaults from RETRIEVE_DRIVER env
-	tenant := &types.Tenant{
-		Name:        fmt.Sprintf("%s's Workspace", secutils.SanitizeForLog(req.Username)),
-		Description: "Default workspace",
-		Status:      "active",
-	}
-
-	createdTenant, err := s.tenantService.CreateTenant(ctx, tenant)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to create tenant")
-		return nil, errors.New("failed to create workspace")
-	}
-
-	// Create user
+	now := time.Now()
 	user := &types.User{
 		ID:           uuid.New().String(),
 		Username:     req.Username,
 		Email:        req.Email,
 		PasswordHash: string(hashedPassword),
-		TenantID:     createdTenant.ID,
 		IsActive:     true,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		Role:         types.UserRoleMember,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
-	err = s.userRepo.CreateUser(ctx, user)
-	if err != nil {
+	if invitation != nil {
+		// Invited user joins the inviter's tenant instead of getting a new workspace.
+		user.TenantID = invitation.TenantID
+		user.InvitedByUserID = invitation.InvitedByUserID
+		if invitation.Role.IsValid() {
+			user.Role = invitation.Role
+		}
+		if invitation.Permissions != nil {
+			user.Permissions = invitation.Permissions
+		}
+	} else {
+		// First user of a brand-new tenant becomes its owner.
+		tenant := &types.Tenant{
+			Name:        fmt.Sprintf("%s's Workspace", secutils.SanitizeForLog(req.Username)),
+			Description: "Default workspace",
+			Status:      "active",
+		}
+		createdTenant, terr := s.tenantService.CreateTenant(ctx, tenant)
+		if terr != nil {
+			logger.Errorf(ctx, "Failed to create tenant: %v", terr)
+			return nil, errors.New("failed to create workspace")
+		}
+		user.TenantID = createdTenant.ID
+		user.Role = types.UserRoleOwner
+	}
+
+	if err := s.userRepo.CreateUser(ctx, user); err != nil {
 		logger.Errorf(ctx, "Failed to create user: %v", err)
 		return nil, errors.New("failed to create user")
 	}
 
+	if invitation != nil {
+		acceptedAt := now
+		invitation.Status = types.InvitationStatusAccepted
+		invitation.AcceptedAt = &acceptedAt
+		invitation.AcceptedUserID = user.ID
+		invitation.UpdatedAt = now
+		if err := s.invitationRepo.Update(ctx, invitation); err != nil {
+			logger.Errorf(ctx, "Failed to mark invitation as accepted: %v", err)
+			// Best-effort: user is already created; return success but log loudly.
+		}
+		s.applyInvitationKBGrants(ctx, invitation, user)
+	}
+
 	logger.Info(ctx, "User registered successfully")
 	return user, nil
+}
+
+// applyInvitationKBGrants persists any KB pre-grants attached to the invitation.
+// Failures are logged but never block the registration; missing grants can be
+// re-added later by an admin.
+func (s *userService) applyInvitationKBGrants(ctx context.Context, inv *types.UserInvitation, user *types.User) {
+	if s.kbPermRepo == nil || inv == nil || inv.KnowledgeBaseGrants == nil {
+		return
+	}
+	var grants []types.InvitationKBGrant
+	if err := inv.KnowledgeBaseGrants.Unmarshal(&grants); err != nil {
+		logger.Warnf(ctx, "Failed to decode invitation KB grants: %v", err)
+		return
+	}
+	now := time.Now()
+	for _, g := range grants {
+		if !g.Permission.IsValid() || strings.TrimSpace(g.KnowledgeBaseID) == "" {
+			continue
+		}
+		grant := &types.KBUserPermission{
+			ID:              uuid.New().String(),
+			KnowledgeBaseID: g.KnowledgeBaseID,
+			UserID:          user.ID,
+			TenantID:        user.TenantID,
+			Permission:      g.Permission,
+			GrantedByUserID: inv.InvitedByUserID,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		if err := s.kbPermRepo.Create(ctx, grant); err != nil {
+			logger.Warnf(ctx, "Failed to apply invitation KB grant %s -> %s: %v", g.KnowledgeBaseID, user.ID, err)
+		}
+	}
+}
+
+// lookupInvitationByToken validates a raw invitation token and returns the row.
+// Errors are intentionally generic to avoid leaking token validity status.
+func (s *userService) lookupInvitationByToken(ctx context.Context, rawToken string) (*types.UserInvitation, error) {
+	if s.invitationRepo == nil {
+		return nil, errors.New("invitations are not enabled")
+	}
+	hash := HashInvitationToken(rawToken)
+	inv, err := s.invitationRepo.GetByTokenHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, apprepo.ErrInvitationNotFound) {
+			return nil, errors.New("invalid or expired invitation")
+		}
+		return nil, err
+	}
+	if !inv.IsActive(time.Now()) {
+		// Auto-mark expired so the admin UI can show accurate status next time.
+		if inv.Status == types.InvitationStatusPending {
+			inv.Status = types.InvitationStatusExpired
+			_ = s.invitationRepo.Update(ctx, inv)
+		}
+		return nil, errors.New("invalid or expired invitation")
+	}
+	return inv, nil
 }
 
 // Login authenticates a user and returns tokens
@@ -555,6 +697,152 @@ func (s *userService) SearchUsers(ctx context.Context, query string, limit int) 
 		return []*types.User{}, nil
 	}
 	return s.userRepo.SearchUsers(ctx, query, limit)
+}
+
+// ListTenantUsers returns the users of a tenant with pagination metadata.
+func (s *userService) ListTenantUsers(ctx context.Context, tenantID uint64, offset, limit int) ([]*types.User, int64, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return s.userRepo.ListUsersByTenant(ctx, tenantID, offset, limit)
+}
+
+// UpdateUserRole sets the global role of a user inside the actor's tenant.
+//
+// Authorization rules:
+//   - actor must have manage_users permission
+//   - actor must outrank both the target's current role AND the new role (no
+//     promoting someone above yourself, no demoting a peer/superior)
+//   - the only Owner of a tenant cannot lose their owner role
+func (s *userService) UpdateUserRole(ctx context.Context, actor *types.User, targetUserID string, role types.UserRole) (*types.User, error) {
+	if actor == nil {
+		return nil, errors.New("actor required")
+	}
+	if !actor.Can("manage_users") {
+		return nil, errors.New("permission denied")
+	}
+	if !role.IsValid() {
+		return nil, errors.New("invalid role")
+	}
+
+	target, err := s.userRepo.GetUserByID(ctx, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	if target.TenantID != actor.TenantID {
+		return nil, errors.New("target user is in a different tenant")
+	}
+	if target.ID == actor.ID && role != actor.Role {
+		return nil, errors.New("cannot change your own role")
+	}
+	if !actor.Role.HasAtLeast(target.Role) || !actor.Role.HasAtLeast(role) {
+		return nil, errors.New("cannot assign a role higher than your own")
+	}
+
+	// Prevent leaving the tenant ownerless.
+	if target.Role == types.UserRoleOwner && role != types.UserRoleOwner {
+		owners, _, err := s.userRepo.ListUsersByTenant(ctx, target.TenantID, 0, 200)
+		if err != nil {
+			return nil, err
+		}
+		ownerCount := 0
+		for _, u := range owners {
+			if u.Role == types.UserRoleOwner && u.IsActive {
+				ownerCount++
+			}
+		}
+		if ownerCount <= 1 {
+			return nil, errors.New("cannot demote the only owner of the tenant")
+		}
+	}
+
+	target.Role = role
+	target.UpdatedAt = time.Now()
+	if err := s.userRepo.UpdateUser(ctx, target); err != nil {
+		return nil, err
+	}
+	return target, nil
+}
+
+// UpdateUserPermissions overrides the feature flags of a single user.
+// Passing all-nil flags clears the override and reverts to role defaults.
+func (s *userService) UpdateUserPermissions(ctx context.Context, actor *types.User, targetUserID string, perms types.UserPermissions) (*types.User, error) {
+	if actor == nil {
+		return nil, errors.New("actor required")
+	}
+	if !actor.Can("manage_users") {
+		return nil, errors.New("permission denied")
+	}
+
+	target, err := s.userRepo.GetUserByID(ctx, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	if target.TenantID != actor.TenantID {
+		return nil, errors.New("target user is in a different tenant")
+	}
+	if !actor.Role.HasAtLeast(target.Role) {
+		return nil, errors.New("cannot modify a user with a higher role")
+	}
+
+	// All-nil overrides means "clear" -> store NULL so role defaults take over.
+	allNil := perms.CanChat == nil && perms.CanSearch == nil && perms.CanCreateKB == nil &&
+		perms.CanInviteUsers == nil && perms.CanManageUsers == nil && perms.CanManageKBs == nil
+	if allNil {
+		target.Permissions = nil
+	} else {
+		raw, err := types.MarshalToJSON(perms)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode permissions: %w", err)
+		}
+		target.Permissions = raw
+	}
+	target.UpdatedAt = time.Now()
+	if err := s.userRepo.UpdateUser(ctx, target); err != nil {
+		return nil, err
+	}
+	return target, nil
+}
+
+// SetUserActive enables or disables a user account.
+func (s *userService) SetUserActive(ctx context.Context, actor *types.User, targetUserID string, active bool) (*types.User, error) {
+	if actor == nil {
+		return nil, errors.New("actor required")
+	}
+	if !actor.Can("manage_users") {
+		return nil, errors.New("permission denied")
+	}
+
+	target, err := s.userRepo.GetUserByID(ctx, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	if target.TenantID != actor.TenantID {
+		return nil, errors.New("target user is in a different tenant")
+	}
+	if target.ID == actor.ID {
+		return nil, errors.New("cannot disable your own account")
+	}
+	if !actor.Role.HasAtLeast(target.Role) {
+		return nil, errors.New("cannot modify a user with a higher role")
+	}
+
+	target.IsActive = active
+	target.UpdatedAt = time.Now()
+	if err := s.userRepo.UpdateUser(ctx, target); err != nil {
+		return nil, err
+	}
+	if !active {
+		// Revoke all active tokens so the user is signed out everywhere.
+		_ = s.tokenRepo.RevokeTokensByUserID(ctx, target.ID)
+	}
+	return target, nil
 }
 
 type oidcDiscoveryDocument struct {

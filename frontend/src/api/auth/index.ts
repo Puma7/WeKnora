@@ -58,6 +58,8 @@ export interface RegisterRequest {
   username: string
   email: string
   password: string
+  /** Optional invitation token; required in invite_only mode unless email is whitelisted. */
+  invitation_token?: string
 }
 
 export interface RegisterResponse {

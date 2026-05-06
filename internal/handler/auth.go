@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -45,7 +44,7 @@ func NewAuthHandler(configInfo *config.Config,
 
 // Register godoc
 // @Summary      用户注册
-// @Description  注册新用户账号
+// @Description  注册新用户账号 (modes: open / invite_only / whitelist / disabled)
 // @Tags         认证
 // @Accept       json
 // @Produce      json
@@ -59,14 +58,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	logger.Info(ctx, "Start user registration")
 
-	// 通过环境变量 DISABLE_REGISTRATION=true 禁止注册
-	if os.Getenv("DISABLE_REGISTRATION") == "true" {
-		logger.Warn(ctx, "Registration is disabled by DISABLE_REGISTRATION env")
-		appErr := errors.NewForbiddenError("Registration is disabled")
-		c.Error(appErr)
-		return
-	}
-
 	var req types.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error(ctx, "Failed to parse registration request parameters", err)
@@ -78,16 +69,15 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	req.Email = secutils.SanitizeForLog(req.Email)
 	req.Password = secutils.SanitizeForLog(req.Password)
 
-	// Validate required fields
 	if req.Username == "" || req.Email == "" || req.Password == "" {
 		logger.Error(ctx, "Missing required registration fields")
 		appErr := errors.NewValidationError("Username, email and password are required")
 		c.Error(appErr)
 		return
 	}
-	req.Username = secutils.SanitizeForLog(req.Username)
-	req.Email = secutils.SanitizeForLog(req.Email)
-	// Call service to register user
+
+	// Mode validation now lives in the user service so all registration paths
+	// (form + invitation accept) share one gate.
 	user, err := h.userService.Register(ctx, &req)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to register user: %v", err)
@@ -96,7 +86,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// Return success response
 	response := &types.RegisterResponse{
 		Success: true,
 		Message: "Registration successful",
@@ -105,6 +94,25 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	logger.Infof(ctx, "User registered successfully: %s", secutils.SanitizeForLog(user.Email))
 	c.JSON(http.StatusCreated, response)
+}
+
+// GetRegistrationMode godoc
+// @Summary  Public registration configuration
+// @Description Returns the active registration mode plus a hint whether self-registration is allowed.
+//
+//	Used by the frontend to render or hide the signup form. Never exposes the whitelist contents.
+//
+// @Tags     认证
+// @Produce  json
+// @Success  200  {object}  types.RegistrationModePublic
+// @Router   /auth/registration-mode [get]
+func (h *AuthHandler) GetRegistrationMode(c *gin.Context) {
+	ctx := c.Request.Context()
+	settings := h.userService.RegistrationSettings(ctx)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    settings.PublicView(),
+	})
 }
 
 // Login godoc

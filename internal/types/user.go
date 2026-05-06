@@ -6,6 +6,71 @@ import (
 	"gorm.io/gorm"
 )
 
+// UserRole represents the global role of a user inside their tenant.
+// Roles are ordered from most to least privileged. Use HasAtLeast to compare.
+type UserRole string
+
+const (
+	// UserRoleOwner has full control of the tenant; only one per tenant by convention.
+	UserRoleOwner UserRole = "owner"
+	// UserRoleAdmin can invite users, manage permissions, and create knowledge bases.
+	UserRoleAdmin UserRole = "admin"
+	// UserRoleMember can use chat/search and create their own knowledge bases.
+	UserRoleMember UserRole = "member"
+	// UserRoleViewer can only consume content (chat/search on permitted KBs).
+	UserRoleViewer UserRole = "viewer"
+)
+
+// IsValid reports whether the role string is one of the known values.
+func (r UserRole) IsValid() bool {
+	switch r {
+	case UserRoleOwner, UserRoleAdmin, UserRoleMember, UserRoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
+// roleLevel maps roles to comparable integers; higher = more privileged.
+func (r UserRole) level() int {
+	switch r {
+	case UserRoleOwner:
+		return 4
+	case UserRoleAdmin:
+		return 3
+	case UserRoleMember:
+		return 2
+	case UserRoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// HasAtLeast returns true when the current role is at least as privileged as required.
+func (r UserRole) HasAtLeast(required UserRole) bool {
+	return r.level() >= required.level()
+}
+
+// UserPermissions captures feature-level toggles that override role defaults.
+// Pointers distinguish "not set / use role default" from "explicitly false".
+type UserPermissions struct {
+	CanChat        *bool `json:"can_chat,omitempty"`
+	CanSearch      *bool `json:"can_search,omitempty"`
+	CanCreateKB    *bool `json:"can_create_kb,omitempty"`
+	CanInviteUsers *bool `json:"can_invite_users,omitempty"`
+	CanManageUsers *bool `json:"can_manage_users,omitempty"`
+	CanManageKBs   *bool `json:"can_manage_kbs,omitempty"`
+}
+
+// boolPtr returns the value of a *bool with the supplied default applied.
+func boolPtr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
 // User represents a user in the system
 type User struct {
 	// Unique identifier of the user
@@ -24,6 +89,12 @@ type User struct {
 	IsActive bool `json:"is_active"  gorm:"default:true"`
 	// Whether the user can access all tenants (cross-tenant access)
 	CanAccessAllTenants bool `json:"can_access_all_tenants" gorm:"default:false"`
+	// Global role within the tenant
+	Role UserRole `json:"role" gorm:"type:varchar(32);not null;default:'member'"`
+	// Optional feature-flag overrides (JSON map persisted as JSONB)
+	Permissions *JSON `json:"permissions,omitempty" gorm:"type:jsonb"`
+	// User ID of the admin who invited this account; empty for self-registered or OIDC users
+	InvitedByUserID string `json:"invited_by_user_id,omitempty" gorm:"type:varchar(36);column:invited_by_user_id"`
 	// Creation time of the user
 	CreatedAt time.Time `json:"created_at"`
 	// Last updated time of the user
@@ -33,6 +104,79 @@ type User struct {
 
 	// Association relationship, not stored in the database
 	Tenant *Tenant `json:"tenant,omitempty" gorm:"foreignKey:TenantID"`
+}
+
+// EffectivePermissions returns the user's effective feature flags, applying
+// role-based defaults plus any explicit overrides stored in u.Permissions.
+func (u *User) EffectivePermissions() UserPermissions {
+	role := u.Role
+	if !role.IsValid() {
+		role = UserRoleMember
+	}
+
+	// Defaults derived from role; admins/owners get everything.
+	defaults := UserPermissions{}
+	switch role {
+	case UserRoleOwner, UserRoleAdmin:
+		t := true
+		defaults = UserPermissions{
+			CanChat: &t, CanSearch: &t, CanCreateKB: &t,
+			CanInviteUsers: &t, CanManageUsers: &t, CanManageKBs: &t,
+		}
+	case UserRoleMember:
+		t, f := true, false
+		defaults = UserPermissions{
+			CanChat: &t, CanSearch: &t, CanCreateKB: &t,
+			CanInviteUsers: &f, CanManageUsers: &f, CanManageKBs: &f,
+		}
+	case UserRoleViewer:
+		t, f := true, false
+		defaults = UserPermissions{
+			CanChat: &t, CanSearch: &t, CanCreateKB: &f,
+			CanInviteUsers: &f, CanManageUsers: &f, CanManageKBs: &f,
+		}
+	}
+
+	overrides := UserPermissions{}
+	if u.Permissions != nil {
+		_ = u.Permissions.Unmarshal(&overrides)
+	}
+
+	merge := func(o, d *bool) *bool {
+		if o != nil {
+			return o
+		}
+		return d
+	}
+	return UserPermissions{
+		CanChat:        merge(overrides.CanChat, defaults.CanChat),
+		CanSearch:      merge(overrides.CanSearch, defaults.CanSearch),
+		CanCreateKB:    merge(overrides.CanCreateKB, defaults.CanCreateKB),
+		CanInviteUsers: merge(overrides.CanInviteUsers, defaults.CanInviteUsers),
+		CanManageUsers: merge(overrides.CanManageUsers, defaults.CanManageUsers),
+		CanManageKBs:   merge(overrides.CanManageKBs, defaults.CanManageKBs),
+	}
+}
+
+// Can returns the value of a single feature flag, defaulting to false.
+func (u *User) Can(flag string) bool {
+	p := u.EffectivePermissions()
+	switch flag {
+	case "chat":
+		return boolPtr(p.CanChat, false)
+	case "search":
+		return boolPtr(p.CanSearch, false)
+	case "create_kb":
+		return boolPtr(p.CanCreateKB, false)
+	case "invite_users":
+		return boolPtr(p.CanInviteUsers, false)
+	case "manage_users":
+		return boolPtr(p.CanManageUsers, false)
+	case "manage_kbs":
+		return boolPtr(p.CanManageKBs, false)
+	default:
+		return false
+	}
 }
 
 // AuthToken represents an authentication token
@@ -99,6 +243,9 @@ type RegisterRequest struct {
 	Username string `json:"username" binding:"required,min=2,max=50"`
 	Email    string `json:"email"    binding:"required,email"`
 	Password string `json:"password" binding:"required,min=6"`
+	// InvitationToken redeems a pending invitation; required in invite_only mode
+	// unless the email is on the registration whitelist.
+	InvitationToken string `json:"invitation_token,omitempty"`
 }
 
 // LoginResponse represents a login response
@@ -121,19 +268,26 @@ type RegisterResponse struct {
 
 // UserInfo represents user information for API responses
 type UserInfo struct {
-	ID                  string    `json:"id"`
-	Username            string    `json:"username"`
-	Email               string    `json:"email"`
-	Avatar              string    `json:"avatar"`
-	TenantID            uint64    `json:"tenant_id"`
-	IsActive            bool      `json:"is_active"`
-	CanAccessAllTenants bool      `json:"can_access_all_tenants"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                  string          `json:"id"`
+	Username            string          `json:"username"`
+	Email               string          `json:"email"`
+	Avatar              string          `json:"avatar"`
+	TenantID            uint64          `json:"tenant_id"`
+	IsActive            bool            `json:"is_active"`
+	CanAccessAllTenants bool            `json:"can_access_all_tenants"`
+	Role                UserRole        `json:"role"`
+	Permissions         UserPermissions `json:"permissions"`
+	InvitedByUserID     string          `json:"invited_by_user_id,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 // ToUserInfo converts User to UserInfo (without sensitive data)
 func (u *User) ToUserInfo() *UserInfo {
+	role := u.Role
+	if !role.IsValid() {
+		role = UserRoleMember
+	}
 	return &UserInfo{
 		ID:                  u.ID,
 		Username:            u.Username,
@@ -142,6 +296,9 @@ func (u *User) ToUserInfo() *UserInfo {
 		TenantID:            u.TenantID,
 		IsActive:            u.IsActive,
 		CanAccessAllTenants: u.CanAccessAllTenants,
+		Role:                role,
+		Permissions:         u.EffectivePermissions(),
+		InvitedByUserID:     u.InvitedByUserID,
 		CreatedAt:           u.CreatedAt,
 		UpdatedAt:           u.UpdatedAt,
 	}

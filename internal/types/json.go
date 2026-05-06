@@ -83,3 +83,27 @@ func (j JSON) Map() (map[string]interface{}, error) {
 	err := json.Unmarshal(j, &m)
 	return m, err
 }
+
+// Unmarshal decodes the JSON value into the provided destination.
+// Empty/nil values are treated as a successful no-op so callers can pass
+// optional fields without checking for nil first.
+func (j JSON) Unmarshal(dst interface{}) error {
+	if len(j) == 0 {
+		return nil
+	}
+	return json.Unmarshal(j, dst)
+}
+
+// MarshalToJSON encodes any value into a *JSON pointer suitable for storage.
+// Returns nil when value is nil.
+func MarshalToJSON(value interface{}) (*JSON, error) {
+	if value == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	j := JSON(raw)
+	return &j, nil
+}

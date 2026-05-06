@@ -69,6 +69,9 @@ type RouterParams struct {
 	DataSourceHandler        *handler.DataSourceHandler
 	WeKnoraCloudHandler      *handler.WeKnoraCloudHandler
 	WikiPageHandler          *handler.WikiPageHandler
+	InvitationHandler        *handler.InvitationHandler
+	AdminUserHandler         *handler.AdminUserHandler
+	KBPermissionHandler      *handler.KBPermissionHandler
 }
 
 // NewRouter 创建新的路由
@@ -162,6 +165,10 @@ func NewRouter(params RouterParams) *gin.Engine {
 		RegisterWeKnoraCloudRoutes(v1, params.WeKnoraCloudHandler)
 		RegisterWikiPageRoutes(v1, params.WikiPageHandler)
 		RegisterChunkerDebugRoutes(v1)
+		RegisterInvitationPublicRoutes(v1, params.InvitationHandler)
+		RegisterAdminInvitationRoutes(v1, params.InvitationHandler)
+		RegisterAdminUserRoutes(v1, params.AdminUserHandler)
+		RegisterKBPermissionRoutes(v1, params.KBPermissionHandler)
 	}
 
 	return r
@@ -439,6 +446,46 @@ func RegisterAuthRoutes(r *gin.RouterGroup, handler *handler.AuthHandler) {
 	r.POST("/auth/logout", handler.Logout)
 	r.GET("/auth/me", handler.GetCurrentUser)
 	r.POST("/auth/change-password", handler.ChangePassword)
+	r.GET("/auth/registration-mode", handler.GetRegistrationMode)
+}
+
+// RegisterInvitationPublicRoutes registers the public invitation preview route.
+// This must run after the auth middleware whitelist is set so unauthenticated
+// invitees can read the invitation card before signing up.
+func RegisterInvitationPublicRoutes(r *gin.RouterGroup, h *handler.InvitationHandler) {
+	r.GET("/auth/invitations/:token", h.PreviewInvitation)
+}
+
+// RegisterAdminInvitationRoutes registers admin-only invitation management.
+func RegisterAdminInvitationRoutes(r *gin.RouterGroup, h *handler.InvitationHandler) {
+	g := r.Group("/admin/invitations")
+	{
+		g.POST("", h.CreateInvitation)
+		g.GET("", h.ListInvitations)
+		g.DELETE("/:id", h.RevokeInvitation)
+	}
+}
+
+// RegisterAdminUserRoutes registers admin-only user management routes.
+func RegisterAdminUserRoutes(r *gin.RouterGroup, h *handler.AdminUserHandler) {
+	g := r.Group("/admin/users")
+	{
+		g.GET("", h.ListUsers)
+		g.PUT("/:id/role", h.UpdateUserRole)
+		g.PUT("/:id/permissions", h.UpdateUserPermissions)
+		g.PUT("/:id/active", h.SetUserActive)
+	}
+}
+
+// RegisterKBPermissionRoutes registers per-user KB permission routes.
+func RegisterKBPermissionRoutes(r *gin.RouterGroup, h *handler.KBPermissionHandler) {
+	g := r.Group("/knowledge-bases/:id/user-permissions")
+	{
+		g.GET("", h.ListGrants)
+		g.POST("", h.CreateGrant)
+		g.PUT("/:grant_id", h.UpdateGrant)
+		g.DELETE("/:grant_id", h.RevokeGrant)
+	}
 }
 
 func RegisterInitializationRoutes(r *gin.RouterGroup, handler *handler.InitializationHandler) {

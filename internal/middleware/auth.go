@@ -19,15 +19,17 @@ import (
 
 // 无需认证的API列表
 var noAuthAPI = map[string][]string{
-	"/health":                    {"GET"},
-	"/api/v1/auth/register":      {"POST"},
-	"/api/v1/auth/login":         {"POST"},
-	"/api/v1/auth/auto-setup":    {"POST"},
-	"/api/v1/auth/oidc/config":   {"GET"},
-	"/api/v1/auth/oidc/url":      {"GET"},
-	"/api/v1/auth/oidc/callback": {"GET"},
-	"/api/v1/auth/refresh":       {"POST"},
-	"/api/v1/files/presigned":    {"GET"},
+	"/health":                       {"GET"},
+	"/api/v1/auth/register":         {"POST"},
+	"/api/v1/auth/login":            {"POST"},
+	"/api/v1/auth/auto-setup":       {"POST"},
+	"/api/v1/auth/oidc/config":      {"GET"},
+	"/api/v1/auth/oidc/url":         {"GET"},
+	"/api/v1/auth/oidc/callback":    {"GET"},
+	"/api/v1/auth/refresh":          {"POST"},
+	"/api/v1/auth/registration-mode": {"GET"},
+	"/api/v1/auth/invitations/*":    {"GET"},
+	"/api/v1/files/presigned":       {"GET"},
 }
 
 // 检查请求是否在无需认证的API列表中
@@ -235,4 +237,53 @@ func GetTenantIDFromContext(ctx context.Context) (uint64, error) {
 		return 0, errors.New("tenant ID not found in context")
 	}
 	return tenantID, nil
+}
+
+// userFromContext returns the authenticated user, if any.
+func userFromContext(c *gin.Context) (*types.User, bool) {
+	v, ok := c.Get(types.UserContextKey.String())
+	if !ok {
+		return nil, false
+	}
+	user, ok := v.(*types.User)
+	return user, ok && user != nil
+}
+
+// RequireRole returns a middleware that aborts with 403 if the authenticated
+// user's role is below the supplied minimum.
+func RequireRole(minRole types.UserRole) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := userFromContext(c)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: authentication required"})
+			c.Abort()
+			return
+		}
+		if !user.Role.HasAtLeast(minRole) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: insufficient role"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequireFeature returns a middleware that aborts with 403 unless the
+// authenticated user holds the specified feature flag (chat, search, create_kb,
+// invite_users, manage_users, manage_kbs).
+func RequireFeature(feature string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := userFromContext(c)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: authentication required"})
+			c.Abort()
+			return
+		}
+		if !user.Can(feature) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: missing feature permission"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }

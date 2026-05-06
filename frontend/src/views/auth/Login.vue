@@ -230,10 +230,19 @@
           </t-button>
 
           <div class="form-footer login-form-footer">
-            <span>{{ $t('auth.noAccount') }}</span>
-            <a href="#" @click.prevent="toggleMode" class="link-button">
-              {{ $t('auth.registerNow') }}
-            </a>
+            <template v-if="canSelfRegister">
+              <span>{{ $t('auth.noAccount') }}</span>
+              <a href="#" @click.prevent="toggleMode" class="link-button">
+                {{ $t('auth.registerNow') }}
+              </a>
+            </template>
+            <template v-else>
+              <span class="reg-disabled-hint">
+                {{ registrationMode.mode === 'disabled'
+                  ? $t('auth.registrationDisabled')
+                  : $t('auth.registrationByInviteOnly') }}
+              </span>
+            </template>
           </div>
 
           <div v-if="oidcEnabled" class="oidc-divider">
@@ -378,6 +387,7 @@ import 'swiper/css'
 import 'swiper/css/effect-fade'
 import 'swiper/css/pagination'
 import { login, register, getOIDCAuthorizationURL, getOIDCConfig, autoSetup } from '@/api/auth'
+import { getRegistrationMode, type RegistrationModePublic } from '@/api/admin'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
 
@@ -423,6 +433,13 @@ const isRegisterMode = ref(false)
 const showLanguageMenu = ref(false)
 const oidcEnabled = ref(false)
 const oidcProviderName = ref('')
+const registrationMode = ref<RegistrationModePublic>({
+  mode: 'open',
+  has_email_whitelist: false,
+  allow_self_register: true,
+  allow_invited_register: true,
+})
+const canSelfRegister = computed(() => registrationMode.value.allow_self_register)
 
 // Language options
 const languageOptions = [
@@ -692,7 +709,17 @@ onMounted(async () => {
   }
 
   loadOIDCConfig()
+  loadRegistrationMode()
 })
+
+async function loadRegistrationMode() {
+  try {
+    const mode = await getRegistrationMode()
+    if (mode) registrationMode.value = mode
+  } catch {
+    // Default stays "open" so the form remains usable if the endpoint hiccups.
+  }
+}
 </script>
 
 <style lang="less" scoped>

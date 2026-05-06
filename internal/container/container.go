@@ -149,6 +149,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewKBShareRepository))
 	must(container.Provide(repository.NewAgentShareRepository))
 	must(container.Provide(repository.NewTenantDisabledSharedAgentRepository))
+	must(container.Provide(repository.NewInvitationRepository))
+	must(container.Provide(repository.NewKBPermissionRepository))
 	must(container.Provide(service.NewWebSearchStateService))
 	must(container.Provide(repository.NewDataSourceRepository))
 	must(container.Provide(repository.NewSyncLogRepository))
@@ -173,6 +175,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewDatasetService))
 	must(container.Provide(service.NewEvaluationService))
 	must(container.Provide(service.NewUserService))
+	must(container.Provide(service.NewInvitationService))
+	must(container.Provide(service.NewKBPermissionService))
 	must(container.Provide(service.NewWeKnoraCloudService))
 
 	// Extract services - register individual extracters with names
@@ -283,6 +287,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewSkillService))
 	must(container.Provide(handler.NewSkillHandler))
 	must(container.Provide(handler.NewOrganizationHandler))
+	must(container.Provide(handler.NewInvitationHandler))
+	must(container.Provide(handler.NewAdminUserHandler))
+	must(container.Provide(handler.NewKBPermissionHandler))
 
 	// Data source handler
 	must(container.Provide(handler.NewDataSourceHandler))

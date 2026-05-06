@@ -154,6 +154,10 @@
                     <t-icon class="menu-icon" name="setting" />
                     <span>{{ $t('knowledgeBase.settings') }}</span>
                   </div>
+                  <div class="popup-menu-item" @click.stop="openPermissionsById(kb.id)">
+                    <t-icon class="menu-icon" name="usergroup" />
+                    <span>{{ $t('kbPermissions.menuItem') }}</span>
+                  </div>
                   <div class="popup-menu-item delete" @click.stop="handleDeleteById(kb.id)">
                     <t-icon class="menu-icon" name="delete" />
                     <span>{{ $t('common.delete') }}</span>
@@ -337,6 +341,10 @@
                 <div class="popup-menu-item" @click.stop="handleSettings(kb)">
                   <t-icon class="menu-icon" name="setting" />
                   <span>{{ $t('knowledgeBase.settings') }}</span>
+                </div>
+                <div class="popup-menu-item" @click.stop="openPermissions(kb)">
+                  <t-icon class="menu-icon" name="usergroup" />
+                  <span>{{ $t('kbPermissions.menuItem') }}</span>
                 </div>
                 <div class="popup-menu-item delete" @click.stop="handleDelete(kb)">
                   <t-icon class="menu-icon" name="delete" />
@@ -584,6 +592,14 @@
       @shared="handleShareSuccess"
     />
 
+    <!-- KB user permissions dialog -->
+    <KBPermissionsDialog
+      v-if="permissionsKbId"
+      :visible="permissionsDialogVisible"
+      :kb-id="permissionsKbId"
+      @close="permissionsDialogVisible = false"
+    />
+
     <!-- 右侧：共享知识库详情面板 -->
     <Teleport to="body">
       <Transition name="shared-detail-drawer">
@@ -656,6 +672,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useOrganizationStore } from '@/stores/organization'
 import { listOrganizationSharedKnowledgeBases, type SharedKnowledgeBase, type OrganizationSharedKnowledgeBaseItem, type SourceFromAgentInfo } from '@/api/organization'
 import KnowledgeBaseEditorModal from './KnowledgeBaseEditorModal.vue'
+import KBPermissionsDialog from './KBPermissionsDialog.vue'
 import ShareKnowledgeBaseDialog from '@/components/ShareKnowledgeBaseDialog.vue'
 import ListSpaceSidebar from '@/components/ListSpaceSidebar.vue'
 import { useI18n } from 'vue-i18n'
@@ -906,6 +923,19 @@ const handleSettings = (kb: KB) => {
 // 通过 ID 处理设置（用于全部 Tab 下的知识库）
 const handleSettingsById = (id: string) => {
   goSettings(id)
+}
+
+// KB-level user permissions dialog
+const permissionsDialogVisible = ref(false)
+const permissionsKbId = ref('')
+const openPermissions = (kb: KB) => {
+  kb.showMore = false
+  permissionsKbId.value = kb.id
+  permissionsDialogVisible.value = true
+}
+const openPermissionsById = (id: string) => {
+  permissionsKbId.value = id
+  permissionsDialogVisible.value = true
 }
 
 // 通过 ID 处理删除（用于全部 Tab 下的知识库）

@@ -82,6 +82,13 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 	kb.CreatedAt = time.Now()
 	kb.TenantID = types.MustTenantIDFromContext(ctx)
 	kb.UpdatedAt = time.Now()
+	// Stamp the creator as the owner so per-user permission checks know who manages the KB.
+	// API-key requests use a synthetic user (id "system-<tenant>") which is harmless to record.
+	if kb.OwnerID == "" {
+		if uid, ok := types.UserIDFromContext(ctx); ok && uid != "" {
+			kb.OwnerID = uid
+		}
+	}
 	kb.EnsureDefaults()
 
 	logger.Infof(ctx, "Creating knowledge base, ID: %s, tenant ID: %d, name: %s", kb.ID, kb.TenantID, kb.Name)

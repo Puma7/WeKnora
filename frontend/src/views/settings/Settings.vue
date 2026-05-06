@@ -142,6 +142,11 @@
                   <TenantInfo />
                 </div>
 
+                <!-- 用户管理 -->
+                <div v-if="currentSection === 'users'" class="section">
+                  <UserManagement />
+                </div>
+
                 <!-- API 信息 -->
                 <div v-if="currentSection === 'api'" class="section">
                   <ApiInfo />
@@ -178,6 +183,7 @@ import VectorStoreSettings from './VectorStoreSettings.vue'
 import ParserEngineSettings from './ParserEngineSettings.vue'
 import StorageEngineSettings from './StorageEngineSettings.vue'
 import WeKnoraCloudSettings from './WeKnoraCloudSettings.vue'
+import UserManagement from './UserManagement.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -201,6 +207,7 @@ const navItems = computed(() => [
   { key: 'mcp', icon: 'tools', label: t('settings.mcpService') },
   { key: 'system', icon: 'info-circle', label: t('settings.systemSettings') },
   { key: 'tenant', icon: 'user-circle', label: t('settings.tenantInfo') },
+  { key: 'users', icon: 'usergroup', label: t('settings.userManagement') },
   { key: 'api', icon: 'secured', label: t('settings.apiInfo') }
 ])
 

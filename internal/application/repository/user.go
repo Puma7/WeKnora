@@ -107,6 +107,41 @@ func (r *userRepository) ListUsers(ctx context.Context, offset, limit int) ([]*t
 	return users, nil
 }
 
+// ListUsersByTenant returns users in a tenant plus the total count for pagination.
+func (r *userRepository) ListUsersByTenant(ctx context.Context, tenantID uint64, offset, limit int) ([]*types.User, int64, error) {
+	var users []*types.User
+	var total int64
+
+	base := r.db.WithContext(ctx).Model(&types.User{}).Where("tenant_id = ?", tenantID)
+	if err := base.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	query := base.Order("created_at ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	if err := query.Find(&users).Error; err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
+}
+
+// GetUsersByIDs loads a batch of users by ID. Returned slice may be smaller than ids if some are missing.
+func (r *userRepository) GetUsersByIDs(ctx context.Context, ids []string) ([]*types.User, error) {
+	if len(ids) == 0 {
+		return []*types.User{}, nil
+	}
+	var users []*types.User
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
 // SearchUsers searches users by username or email
 func (r *userRepository) SearchUsers(ctx context.Context, query string, limit int) ([]*types.User, error) {
 	var users []*types.User
