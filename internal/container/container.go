@@ -240,6 +240,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(datasource.NewScheduler))
 	must(container.Provide(service.NewDataSourceService))
 	must(container.Invoke(startDataSourceScheduler))
+	must(container.Provide(service.NewKnowledgeWatchdog))
+	must(container.Invoke(startKnowledgeWatchdog))
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
 	must(container.Provide(chatpipeline.NewEventManager))
 	must(container.Invoke(chatpipeline.NewPluginSearch))
@@ -1213,6 +1215,20 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
 
 	cleaner.RegisterWithName("DataSourceScheduler", func() error {
 		scheduler.Stop()
+		return nil
+	})
+}
+
+// startKnowledgeWatchdog starts the log-only stuck-task observability cron
+// and registers a clean shutdown. Failures here are non-fatal — the rest of
+// the system runs fine without it; the operator just loses one signal.
+func startKnowledgeWatchdog(watchdog *service.KnowledgeWatchdog, cleaner interfaces.ResourceCleaner) {
+	if err := watchdog.Start(context.Background()); err != nil {
+		logger.Warnf(context.Background(), "[Container] knowledge watchdog start failed: %v", err)
+		return
+	}
+	cleaner.RegisterWithName("KnowledgeWatchdog", func() error {
+		watchdog.Stop()
 		return nil
 	})
 }

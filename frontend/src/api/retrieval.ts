@@ -9,6 +9,11 @@ export interface RetrievalConfig {
   rerank_top_k: number
   rerank_threshold: number
   rerank_model_id: string
+  // Reciprocal Rank Fusion parameters. Optional — backend applies defaults
+  // (rrf_k=60, vector_weight=0.7, keyword_weight=0.3) when omitted.
+  rrf_k?: number
+  rrf_vector_weight?: number
+  rrf_keyword_weight?: number
 }
 
 // Get tenant retrieval config via KV API

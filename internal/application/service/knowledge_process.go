@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
@@ -218,6 +219,15 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		span.AddEvent("aborted: knowledge is being deleted")
 		return
 	}
+
+	// Heartbeat updated_at while processing so a future watchdog can tell
+	// active long-running ingests apart from genuinely wedged workers. The
+	// goroutine writes a single column (no parse_status stomp) and exits
+	// when the deferred cancel runs at function return. Shared helper —
+	// see knowledge_heartbeat.go — so the post-process handler can run the
+	// same pattern.
+	stopHeartbeat := startKnowledgeHeartbeat(ctx, s.repo, knowledge.ID)
+	defer stopHeartbeat()
 
 	// Get embedding model for vectorization — only needed when vector/keyword indexing is enabled
 	var embeddingModel embedding.Embedder
@@ -587,7 +597,12 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		langfuse.InjectTracing(ctx, &postProcessPayload)
 		payloadBytes, err := json.Marshal(postProcessPayload)
 		if err == nil {
-			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+			// Bound the post-process task explicitly. Without this Asynq falls
+			// back to its 30-min default which is too tight for large docs +
+			// long Q-gen chains; 30m is comfortable for 99% of observed runs
+			// and bounds blast radius if a worker wedges.
+			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes,
+				asynq.Queue("default"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 			if _, err := s.task.Enqueue(task); err != nil {
 				logger.Errorf(ctx, "Failed to enqueue knowledge post process task: %v", err)
 			} else {
@@ -661,15 +676,54 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 	// document, then enrich with image info in a second pass. Enrichment must
 	// happen AFTER concatenation because StartAt is based on original document
 	// offsets — enriched (longer) content would break the positioning.
-	chunkContents := ""
+	//
+	// Pre-allocate a rune buffer so each chunk is placed via copy() instead
+	// of rebuilding the entire string per iteration. Previous shape was
+	// O(N²) in chunk count; now O(total runes).
+	//
+	// The initial capacity is bounded by 2× total content rune count to
+	// guard against a corrupt chunk.EndAt (e.g. a botched migration) that
+	// would otherwise prompt a multi-gigabyte allocation here. Legitimate
+	// gaps from overlap/reordering fit comfortably inside that budget;
+	// the in-range branch below grows the buffer as needed for any chunk
+	// that actually references a higher offset.
+	maxEnd := 0
+	totalContentRunes := 0
 	for _, chunk := range sortedChunks {
-		runes := []rune(chunkContents)
-		if chunk.StartAt <= len(runes) {
-			chunkContents = string(runes[:chunk.StartAt]) + chunk.Content
+		if chunk.EndAt > maxEnd {
+			maxEnd = chunk.EndAt
+		}
+		totalContentRunes += utf8.RuneCountInString(chunk.Content)
+	}
+	allocCap := maxEnd
+	if budget := totalContentRunes * 2; budget > 0 && allocCap > budget {
+		allocCap = budget
+	}
+	buf := make([]rune, 0, allocCap)
+	for _, chunk := range sortedChunks {
+		chunkRunes := []rune(chunk.Content)
+		if chunk.StartAt <= len(buf) {
+			// In-range: overwrite from StartAt and extend the slice if the
+			// chunk runs past the current tail. Mirrors the legacy
+			// `runes[:StartAt] + chunk.Content` truncate-then-append.
+			needed := chunk.StartAt + len(chunkRunes)
+			if needed > cap(buf) {
+				newBuf := make([]rune, needed)
+				copy(newBuf, buf)
+				buf = newBuf
+			} else if needed > len(buf) {
+				buf = buf[:needed]
+			}
+			copy(buf[chunk.StartAt:], chunkRunes)
 		} else {
-			chunkContents = chunkContents + chunk.Content
+			// Gap: legacy behaviour appended literally and ignored the
+			// gap, so a chunk with StartAt > len(buf) lands directly
+			// after the existing content rather than at its absolute
+			// offset. Preserved verbatim.
+			buf = append(buf, chunkRunes...)
 		}
 	}
+	chunkContents := string(buf)
 
 	// Collect image_info from image_ocr/image_caption children and enrich
 	chunkIDs := make([]string, len(sortedChunks))
@@ -2417,3 +2471,4 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 		}
 	}
 }
+

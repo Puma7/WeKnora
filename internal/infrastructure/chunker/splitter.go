@@ -5,11 +5,29 @@ package chunker
 
 import (
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 )
+
+// separatorRegexCache caches the per-separator regex used by
+// splitBySeparators. Keyed by the raw separator string; value is the
+// (QuoteMeta + capturing-group) compiled pattern. Cache size is bounded
+// in practice by the small set of distinct separator strings configured
+// across all KBs over the process lifetime.
+var separatorRegexCache sync.Map // map[string]*regexp.Regexp
+
+func compiledSeparatorRegex(sep string) *regexp.Regexp {
+	if v, ok := separatorRegexCache.Load(sep); ok {
+		return v.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile("(" + regexp.QuoteMeta(sep) + ")")
+	actual, _ := separatorRegexCache.LoadOrStore(sep, re)
+	return actual.(*regexp.Regexp)
+}
 
 // Chunk represents a piece of split text with position tracking.
 //
@@ -175,17 +193,13 @@ func protectedSpans(text string) []span {
 		return nil
 	}
 
-	// Sort by start, then by length descending
-	for i := 1; i < len(all); i++ {
-		for j := i; j > 0; j-- {
-			if all[j].start < all[j-1].start ||
-				(all[j].start == all[j-1].start && (all[j].end-all[j].start) > (all[j-1].end-all[j-1].start)) {
-				all[j], all[j-1] = all[j-1], all[j]
-			} else {
-				break
-			}
+	// Sort by start asc, then by length desc.
+	slices.SortFunc(all, func(a, b match) int {
+		if a.start != b.start {
+			return a.start - b.start
 		}
-	}
+		return (b.end - b.start) - (a.end - a.start)
+	})
 
 	// Remove overlaps
 	var result []span
@@ -226,7 +240,7 @@ func splitBySeparators(text string, separators []string, chunkSize int) []string
 		if sep == "" {
 			continue
 		}
-		re := regexp.MustCompile("(" + regexp.QuoteMeta(sep) + ")")
+		re := compiledSeparatorRegex(sep)
 		splits := re.Split(text, -1)
 		matches := re.FindAllString(text, -1)
 		if len(matches) == 0 {

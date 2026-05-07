@@ -819,6 +819,12 @@ export default {
     rerankModelLabel: "Rerank 모델",
     rerankModelDescription: "검색 결과 재정렬에 사용할 모델을 선택하세요",
     rerankModelRequired: "Rerank 모델을 선택하세요. 검색 기능에 이 모델이 필요합니다.",
+    rrfKLabel: "RRF 평활 상수 (k)",
+    rrfKDescription: "역수 순위 융합의 평활 상수. 값이 클수록 상위 결과에 대한 편향이 완화됩니다 (기본값 60, 권장 범위 30-100).",
+    rrfVectorWeightLabel: "RRF 벡터 가중치",
+    rrfVectorWeightDescription: "RRF 융합에서 벡터 검색에 적용되는 가중치. 일반적으로 키워드 가중치와 합이 1.0이 됩니다 (기본값 0.7).",
+    rrfKeywordWeightLabel: "RRF 키워드 가중치",
+    rrfKeywordWeightDescription: "RRF 융합에서 키워드 검색에 적용되는 가중치 (기본값 0.3).",
     toasts: {
       saveSuccess: "검색 설정이 저장되었습니다",
       saveFailed: "설정 저장 실패: {message}",

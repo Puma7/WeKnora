@@ -77,6 +77,31 @@ func (r *modelRepository) Delete(ctx context.Context, tenantID uint64, id string
 	).Delete(&types.Model{}).Error
 }
 
+// GetDefaultByType returns the tenant's default model for a given type, or
+// (nil, nil) when no default has been configured. Errors are reserved for
+// genuine DB failures; gorm.ErrRecordNotFound is intentionally swallowed so
+// callers can treat "no default" as a normal, non-failing state.
+//
+// Order("id ASC") guards against the rare case where DB inconsistency leaves
+// two rows with is_default=true (e.g. a partial ClearDefaultByType followed
+// by a crash). Without explicit ordering the picked row would depend on the
+// underlying engine's row layout — non-determinism is worse than picking
+// "the older one" by row ID.
+func (r *modelRepository) GetDefaultByType(
+	ctx context.Context, tenantID uint, modelType types.ModelType,
+) (*types.Model, error) {
+	var m types.Model
+	if err := r.db.WithContext(ctx).Where(
+		"tenant_id = ? AND type = ? AND is_default = ?", tenantID, modelType, true,
+	).Order("id ASC").First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
 // ClearDefaultByType clears the default flag for all models of a specific type
 // This is a batch operation that updates all matching records in one query
 func (r *modelRepository) ClearDefaultByType(

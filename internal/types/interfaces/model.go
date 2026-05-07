@@ -29,6 +29,10 @@ type ModelService interface {
 	GetEmbeddingModelForTenant(ctx context.Context, modelId string, tenantID uint64) (embedding.Embedder, error)
 	// GetRerankModel gets a rerank model
 	GetRerankModel(ctx context.Context, modelId string) (rerank.Reranker, error)
+	// GetTenantDefaultRerankModelID returns the tenant's default rerank model
+	// ID, or "" when no default is configured. Errors only on DB failure;
+	// callers can safely treat errors as "no default" by ignoring them.
+	GetTenantDefaultRerankModelID(ctx context.Context, tenantID uint) (string, error)
 	// GetChatModel gets a chat model
 	GetChatModel(ctx context.Context, modelId string) (chat.Chat, error)
 	// GetVLMModel gets a vision language model
@@ -57,4 +61,7 @@ type ModelRepository interface {
 	// ClearDefaultByType clears the default flag for all models of a specific type
 	// optionally excluding a specific model ID.
 	ClearDefaultByType(ctx context.Context, tenantID uint, modelType types.ModelType, excludeID string) error
+	// GetDefaultByType returns the tenant's default model for a given type, or
+	// (nil, nil) when no default has been set. Errors only on DB failure.
+	GetDefaultByType(ctx context.Context, tenantID uint, modelType types.ModelType) (*types.Model, error)
 }

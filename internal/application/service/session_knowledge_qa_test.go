@@ -83,6 +83,10 @@ func (s *stubModelService) GetRerankModel(context.Context, string) (rerank.Reran
 	return nil, nil
 }
 
+func (s *stubModelService) GetTenantDefaultRerankModelID(context.Context, uint) (string, error) {
+	return "", nil
+}
+
 func (s *stubModelService) GetChatModel(context.Context, string) (chat.Chat, error) {
 	return s.chatModel, nil
 }
