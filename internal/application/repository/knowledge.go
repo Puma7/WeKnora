@@ -610,3 +610,109 @@ func (r *knowledgeRepository) ListIDsByTagID(
 		Pluck("id", &ids).Error
 	return ids, err
 }
+
+// TouchProcessingHeartbeat sets processing_started_at to NOW() so the
+// reconciler treats the row as live. Cheap (single-row update) and called
+// every chunk-batch / every 50 AIGS chunks during long ingest.
+func (r *knowledgeRepository) TouchProcessingHeartbeat(ctx context.Context, id string) error {
+	now := time.Now()
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ?", id).
+		Update("processing_started_at", now).Error
+}
+
+// BulkStampProcessingStartedAt writes processing_started_at = when for
+// every row in ids in a single statement. Returns rows affected.
+func (r *knowledgeRepository) BulkStampProcessingStartedAt(
+	ctx context.Context, ids []string, when time.Time,
+) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id IN ?", ids).
+		Update("processing_started_at", when)
+	return res.RowsAffected, res.Error
+}
+
+// SetChunkProgress writes chunks_done/_total in a single UPDATE.
+func (r *knowledgeRepository) SetChunkProgress(ctx context.Context, id string, done, total int) error {
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"chunks_done":  done,
+			"chunks_total": total,
+		}).Error
+}
+
+// SetAIGSProgress writes aigs_chunks_done/_total in a single UPDATE.
+func (r *knowledgeRepository) SetAIGSProgress(ctx context.Context, id string, done, total int) error {
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"aigs_chunks_done":  done,
+			"aigs_chunks_total": total,
+		}).Error
+}
+
+// ListStuckKnowledge returns rows in parse_status='processing' whose
+// heartbeat (processing_started_at) is older than threshold. Rows with
+// NULL heartbeat are EXCLUDED — they predate the migration / first task
+// pickup and might still be served by an old asynq task whose ID we can't
+// match (because deterministic IDs were introduced together with the
+// heartbeat). The reconciler stamps them on first observation, giving
+// them a fresh threshold window before any action is taken.
+func (r *knowledgeRepository) ListStuckKnowledge(
+	ctx context.Context, threshold time.Time, limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out []*types.Knowledge
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("parse_status = ? AND processing_started_at IS NOT NULL AND processing_started_at < ?",
+			types.ParseStatusProcessing, threshold).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	return out, err
+}
+
+// ListUnobservedKnowledge returns rows in parse_status='processing' that
+// have NULL processing_started_at. These are pre-migration rows or rows
+// whose worker hasn't yet recorded a heartbeat. The reconciler stamps
+// them on first sight so they enter ListStuckKnowledge's purview only
+// after a full grace period.
+func (r *knowledgeRepository) ListUnobservedKnowledge(
+	ctx context.Context, limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out []*types.Knowledge
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("parse_status = ? AND processing_started_at IS NULL",
+			types.ParseStatusProcessing).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	return out, err
+}
+
+// ListStuckSummary mirrors ListStuckKnowledge for summary_status. Same
+// NULL-grace policy applies.
+func (r *knowledgeRepository) ListStuckSummary(
+	ctx context.Context, threshold time.Time, limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out []*types.Knowledge
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("summary_status = ? AND processing_started_at IS NOT NULL AND processing_started_at < ?",
+			types.SummaryStatusProcessing, threshold).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	return out, err
+}

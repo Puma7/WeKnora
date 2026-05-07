@@ -23,6 +23,12 @@ interface KnowledgeItem {
   description?: string;
   channel?: string;
   isMore?: boolean;
+  // Live progress (added in 000040 migration). Only meaningful while
+  // parse_status is 'processing'.
+  chunks_total?: number;
+  chunks_done?: number;
+  aigs_chunks_total?: number;
+  aigs_chunks_done?: number;
 }
 
 const props = defineProps<{
@@ -85,9 +91,24 @@ interface StatusInfo {
   icon?: string;
   spin?: boolean;
 }
+// progressLabel returns a "X/Y" suffix to append to the processing
+// status when the backend has populated chunks_total. AIGS progress
+// takes precedence over chunk progress because it runs after chunking
+// and is usually the dominant phase for large documents.
+const progressLabel = (item: KnowledgeItem): string => {
+  if (item.aigs_chunks_total && item.aigs_chunks_total > 0) {
+    return ` ${item.aigs_chunks_done ?? 0}/${item.aigs_chunks_total}`;
+  }
+  if (item.chunks_total && item.chunks_total > 0) {
+    return ` ${item.chunks_done ?? 0}/${item.chunks_total}`;
+  }
+  return '';
+};
+
 const computeStatus = (item: KnowledgeItem): StatusInfo => {
   if (item.parse_status === 'pending' || item.parse_status === 'processing') {
-    return { label: t('knowledgeBase.statusProcessing'), theme: 'primary', icon: 'loading', spin: true };
+    const label = t('knowledgeBase.statusProcessing') + progressLabel(item);
+    return { label, theme: 'primary', icon: 'loading', spin: true };
   }
   if (item.parse_status === 'failed') {
     return { label: t('knowledgeBase.statusFailed'), theme: 'danger', icon: 'close-circle' };

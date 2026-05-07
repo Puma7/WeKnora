@@ -28,13 +28,15 @@ func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, 
 	var wg sync.WaitGroup
 	var mu sync.Mutex  // For synchronizing access to error
 	var firstErr error // Record the first error that occurs
-	batchSizeStr := os.Getenv("BATCH_EMBED_SIZE")
-	if batchSizeStr == "" {
-		batchSizeStr = "5"
-	}
-	batchSize, err := strconv.Atoi(batchSizeStr)
-	if err != nil {
-		return nil, err
+	// Default kept at 5 so existing setups (smaller Ollama instances,
+	// stricter API rate limits like OpenAI free tier, Aliyun, etc.) keep
+	// working unchanged. Recommended override for batch-friendly
+	// embedders (Nemotron, BGE-M3): 16-64 via BATCH_EMBED_SIZE env.
+	batchSize := 5
+	if v := os.Getenv("BATCH_EMBED_SIZE"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			batchSize = parsed
+		}
 	}
 	textEmbeddings := utils.MapSlice(texts, func(text string) *textEmbedding {
 		return &textEmbedding{text: text}
@@ -44,8 +46,21 @@ func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, 
 	processChunk := func(texts []*textEmbedding) func() {
 		return func() {
 			defer wg.Done()
+			// If the parent ctx is already done, skip the embedding call
+			// outright so a cancelled task doesn't keep firing requests.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = ctxErr
+				}
+				mu.Unlock()
+				return
+			}
 			// If an error has already occurred, don't continue processing
-			if firstErr != nil {
+			mu.Lock()
+			alreadyFailed := firstErr != nil
+			mu.Unlock()
+			if alreadyFailed {
 				return
 			}
 			// Embed text
