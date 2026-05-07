@@ -1,4 +1,4 @@
--- Migration: 000040_knowledge_progress_and_heartbeat
+-- Migration: 000041_knowledge_progress_and_heartbeat
 -- Description: Add per-document progress fields and a "processing heartbeat"
 --              column. Together they let the new KnowledgeReconciler service
 --              distinguish "still working" from "stuck" Knowledge rows after
@@ -13,7 +13,7 @@
 --                           "processing" badge.
 --   aigs_chunks_total/_done — same, for the AIGS question-generation pass.
 
-DO $$ BEGIN RAISE NOTICE '[Migration 000040] Adding progress + heartbeat fields to knowledges'; END $$;
+DO $$ BEGIN RAISE NOTICE '[Migration 000041] Adding progress + heartbeat fields to knowledges'; END $$;
 
 ALTER TABLE knowledges
     ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMP WITH TIME ZONE,
@@ -29,4 +29,4 @@ CREATE INDEX IF NOT EXISTS idx_knowledges_parse_status_started
     ON knowledges (parse_status, processing_started_at)
     WHERE parse_status IN ('processing', 'pending');
 
-DO $$ BEGIN RAISE NOTICE '[Migration 000040] knowledges progress + heartbeat columns added'; END $$;
+DO $$ BEGIN RAISE NOTICE '[Migration 000041] knowledges progress + heartbeat columns added'; END $$;

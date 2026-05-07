@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS knowledges (
     processed_at DATETIME,
     error_message TEXT,
     deleted_at DATETIME,
-    -- Synced with versioned/000040_knowledge_progress_and_heartbeat.up.sql.
+    -- Synced with versioned/000041_knowledge_progress_and_heartbeat.up.sql.
     -- The reconciler / heartbeat code in service paths writes these even
     -- in Lite mode, so SQLite needs them too.
     processing_started_at DATETIME,
