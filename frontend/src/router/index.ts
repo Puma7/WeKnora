@@ -246,6 +246,13 @@ async function hydrateSessionFromToken(authStore: ReturnType<typeof useAuthStore
 
 let autoSetupAttempted = false
 let liteDeepLinkRestoreDone = false
+// NEU: defense-in-depth against stale localStorage. Even if the schema-version
+// gate in auth.ts fails to wipe an old shape (e.g. user had a tab open across
+// a deploy), we re-fetch /auth/me on the very first navigation per browser tab
+// when a token is present. This guarantees the in-memory user reflects the
+// backend's truth at least once per page-load, with the cost of one extra
+// request per tab session.
+let userRefreshedThisSession = false
 
 // 路由守卫：检查认证状态和系统初始化状态
 router.beforeEach(async (to, from, next) => {
@@ -281,6 +288,15 @@ router.beforeEach(async (to, from, next) => {
     }
     next()
     return
+  }
+
+  // NEU: once per tab session, force a /auth/me refresh if a token exists. This
+  // closes the stale-localStorage hole where a logged-in user keeps a missing
+  // role/permissions field across deploys. Costs one extra API call per page
+  // load but eliminates a whole class of "I don't see the new feature" bugs.
+  if (!userRefreshedThisSession && authStore.token && to.meta.requiresAuth !== false) {
+    userRefreshedThisSession = true
+    await hydrateSessionFromToken(authStore)
   }
 
   // 检查用户认证状态

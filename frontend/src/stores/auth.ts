@@ -160,6 +160,22 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const initFromStorage = () => {
+    // NEU: schema-version gate. Bumping USER_CACHE_SCHEMA on any breaking shape
+    // change to UserInfo/TenantInfo wipes stale cached objects across the
+    // entire user base — operators don't need to ship custom invalidation
+    // logic per release. Token + refresh_token are preserved so users stay
+    // signed in; the router guard then refetches /auth/me and rehydrates
+    // with the new shape.
+    const USER_CACHE_SCHEMA = 'v2-roles-permissions'
+    const storedSchema = localStorage.getItem('weknora_user_schema')
+    if (storedSchema !== USER_CACHE_SCHEMA) {
+      const KEEP = new Set(['weknora_token', 'weknora_refresh_token', 'weknora_user_schema'])
+      Object.keys(localStorage)
+        .filter(k => k.startsWith('weknora_') && !KEEP.has(k))
+        .forEach(k => localStorage.removeItem(k))
+      localStorage.setItem('weknora_user_schema', USER_CACHE_SCHEMA)
+    }
+
     // 从localStorage恢复状态
     const storedUser = localStorage.getItem('weknora_user')
     const storedTenant = localStorage.getItem('weknora_tenant')
