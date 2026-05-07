@@ -611,9 +611,12 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 			// Bound the post-process task explicitly. Without this Asynq falls
 			// back to its 30-min default which is too tight for large docs +
 			// long Q-gen chains; 30m is comfortable for 99% of observed runs
-			// and bounds blast radius if a worker wedges.
+			// and bounds blast radius if a worker wedges. postProcessOpts()
+			// applies that default; tunable via WEKNORA_POSTPROCESS_TIMEOUT.
+			// Deterministic TaskID is required for the reconciler to
+			// distinguish a live post-process from an orphaned one.
 			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes,
-				asynq.Queue("default"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
+				postProcessOpts(asynq.TaskID(PostProcessTaskID(knowledge.ID)))...)
 			if _, err := s.task.Enqueue(task); err != nil {
 				if IsTaskIDConflict(err) {
 					logger.Infof(ctx, "Post process task already queued for %s, skipping", knowledge.ID)

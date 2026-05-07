@@ -162,9 +162,14 @@ func (s *KnowledgePostProcessService) enqueueSummaryGenerationTask(ctx context.C
 
 	// 30 min matches Asynq's previous implicit default — slow self-hosted
 	// LLMs and rate-limited APIs routinely sit between 15 and 30 min, so a
-	// 15-minute cap would surface as a regression for those tenants.
+	// 15-minute cap would surface as a regression for those tenants. The
+	// summaryOpts() helper applies that default; tunable via
+	// WEKNORA_SUMMARY_TIMEOUT. The deterministic TaskID lets the
+	// reconciler look up the running task to distinguish "live" from
+	// "orphaned in processing" — without it the reconciler would
+	// false-positive an active summary as a dead orphan.
 	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes,
-		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
+		summaryOpts(asynq.TaskID(SummaryTaskID(payload.KnowledgeID)))...)
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		if IsTaskIDConflict(err) {
 			logger.Infof(ctx, "[KnowledgePostProcess] Summary task already queued for %s, skipping", payload.KnowledgeID)
@@ -210,9 +215,13 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationIfEnabled(ctx con
 	// 30 min: Q-Gen is N serial LLM calls (one per question slot up to
 	// QuestionCount). On slow LLMs that easily exceeds 15 min for a single
 	// knowledge with QuestionCount=10. Match Asynq's previous default to
-	// avoid silently regressing those tenants.
+	// avoid silently regressing those tenants. The qgOpts() helper applies
+	// that default; tunable via WEKNORA_QG_TIMEOUT. The deterministic
+	// TaskID is what lets the reconciler tell a running QG apart from a
+	// genuinely orphaned row, and what lets ReparseKnowledge cancel a
+	// stale QG before re-enqueueing.
 	task := asynq.NewTask(types.TypeQuestionGeneration, payloadBytes,
-		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
+		qgOpts(asynq.TaskID(QGTaskID(payload.KnowledgeID)))...)
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		if IsTaskIDConflict(err) {
 			logger.Infof(ctx, "[KnowledgePostProcess] QG task already queued for %s, skipping", payload.KnowledgeID)

@@ -165,8 +165,14 @@ func docProcessTimeout() time.Duration {
 	return envDurationDefault("WEKNORA_DOC_PROCESS_TIMEOUT", 30*time.Minute)
 }
 
+// qgTimeout — Question-Generation runs N sequential LLM calls per
+// chunk slot up to QuestionCount. Default 30m matches asynq's previous
+// implicit default and the convention adopted across the post-process
+// timeouts (Summary, PostProcess) so a single env var doesn't have to
+// be set in three different places. Operators with QuestionCount=10 +
+// slow LLM should override via WEKNORA_QG_TIMEOUT=60m or higher.
 func qgTimeout() time.Duration {
-	return envDurationDefault("WEKNORA_QG_TIMEOUT", 60*time.Minute)
+	return envDurationDefault("WEKNORA_QG_TIMEOUT", 30*time.Minute)
 }
 
 func summaryTimeout() time.Duration {
