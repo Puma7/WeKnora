@@ -124,22 +124,23 @@ type Knowledge struct {
 	// each chunk batch, every 50 AIGS chunks). The reconciler uses
 	// staleness against WEKNORA_STUCK_THRESHOLD to distinguish "still
 	// working" from "orphaned in processing" after retries exhaust or a
-	// crash kills the worker. omitempty so old API consumers see the
-	// exact pre-migration response shape for completed/idle rows.
-	ProcessingStartedAt *time.Time `json:"processing_started_at,omitempty"`
+	// crash kills the worker. Always serialized (nullable for old rows)
+	// to keep the response shape stable for monitoring/clients that
+	// rely on field presence.
+	ProcessingStartedAt *time.Time `json:"processing_started_at"`
 	// ChunksTotal is the planned chunk count for this knowledge (text chunks
 	// only, not image OCR/Caption sub-chunks). Set after chunking, used by
 	// the frontend progress bar.
-	ChunksTotal int `json:"chunks_total,omitempty"        gorm:"default:0"`
+	ChunksTotal int `json:"chunks_total"        gorm:"default:0"`
 	// ChunksDone is the number of chunks already inserted into the DB and
 	// indexed. Bumped during ingest.
-	ChunksDone int `json:"chunks_done,omitempty"         gorm:"default:0"`
+	ChunksDone int `json:"chunks_done"         gorm:"default:0"`
 	// AIGSChunksTotal is the planned chunk count for AIGS question
 	// generation. Equals len(textChunks) at task start.
-	AIGSChunksTotal int `json:"aigs_chunks_total,omitempty"   gorm:"default:0"`
+	AIGSChunksTotal int `json:"aigs_chunks_total"   gorm:"default:0"`
 	// AIGSChunksDone is the number of chunks for which AIGS questions have
 	// been generated and indexed.
-	AIGSChunksDone int `json:"aigs_chunks_done,omitempty"    gorm:"default:0"`
+	AIGSChunksDone int `json:"aigs_chunks_done"    gorm:"default:0"`
 	// Error message of the knowledge
 	ErrorMessage string `json:"error_message"`
 	// Deletion time of the knowledge

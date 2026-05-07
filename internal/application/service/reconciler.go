@@ -102,13 +102,14 @@ func (r *KnowledgeReconciler) cycle(ctx context.Context) error {
 	defer inspector.Close()
 
 	// Phase 1: stamp pre-migration / not-yet-observed rows so they enter
-	// the stuck scan after a grace period (default 1h) shorter than the
-	// normal stuck threshold (default 2h). 1h is conservative enough
-	// that documents waiting in a slow asynq queue (low-CPU host with
-	// many pending docs) are not falsely flagged: a real worker
-	// heartbeat fires within seconds of pickup. A genuinely orphaned
-	// row gets classified ~1h instead of waiting the full threshold.
-	gracePeriod := envDurationDefault("WEKNORA_RECONCILE_GRACE_PERIOD", time.Hour)
+	// the stuck scan after a grace period (default 30min) shorter than
+	// the normal stuck threshold (default 2h). 30min covers normal
+	// asynq queue drain even on low-CPU hosts (a worker heartbeat
+	// fires within seconds of task pickup, so most legitimate processing
+	// docs leave the unobserved set quickly), while still catching
+	// genuinely orphaned rows roughly an order of magnitude faster
+	// than the full threshold.
+	gracePeriod := envDurationDefault("WEKNORA_RECONCILE_GRACE_PERIOD", 30*time.Minute)
 	stuckThreshold := reconcileStuckThreshold()
 	backdate := time.Now().Add(-(stuckThreshold - gracePeriod))
 	if backdate.After(time.Now()) {
