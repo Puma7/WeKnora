@@ -1,11 +1,11 @@
--- Migration: 000040_auth_access_control
+-- Migration: 000042_auth_access_control
 -- Description: Adds invitation-based onboarding and granular access control:
 --              * users.role / users.permissions / users.invited_by_user_id
 --              * knowledge_bases.owner_id (tracks the user who created a KB)
 --              * user_invitations table (magic-link invitations issued by admins)
 --              * kb_user_permissions table (per-user grants on a knowledge base)
 
-DO $$ BEGIN RAISE NOTICE '[Migration 000040] Starting auth/access-control setup...'; END $$;
+DO $$ BEGIN RAISE NOTICE '[Migration 000042] Starting auth/access-control setup...'; END $$;
 
 -- 1. Extend users table with role + feature permissions + invitation lineage
 ALTER TABLE users
@@ -56,7 +56,7 @@ BEGIN
     WHERE t.deleted_at IS NULL AND u.id IS NULL;
 
     IF orphan_count > 0 THEN
-        RAISE NOTICE '[Migration 000040] % tenant(s) have no active owner after backfill: %. Manual review recommended.',
+        RAISE NOTICE '[Migration 000042] % tenant(s) have no active owner after backfill: %. Manual review recommended.',
             orphan_count, orphan_tenant_ids;
     END IF;
 END $$;
@@ -130,4 +130,4 @@ CREATE INDEX IF NOT EXISTS idx_kb_user_permissions_deleted_at ON kb_user_permiss
 COMMENT ON TABLE kb_user_permissions IS 'Per-user direct grants on a knowledge base (complements org-level kb_shares)';
 COMMENT ON COLUMN kb_user_permissions.permission IS 'Access level: viewer, editor, admin';
 
-DO $$ BEGIN RAISE NOTICE '[Migration 000040] auth/access-control setup completed'; END $$;
+DO $$ BEGIN RAISE NOTICE '[Migration 000042] auth/access-control setup completed'; END $$;
