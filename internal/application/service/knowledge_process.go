@@ -9,7 +9,9 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
@@ -27,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 func (s *knowledgeService) cloneKnowledge(
@@ -218,6 +221,15 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		span.AddEvent("aborted: knowledge is being deleted")
 		return
 	}
+
+	// Heartbeat updated_at while processing so a future watchdog can tell
+	// active long-running ingests apart from genuinely wedged workers. The
+	// goroutine writes a single column (no parse_status stomp) and exits
+	// when the deferred cancel runs at function return. Shared helper —
+	// see knowledge_heartbeat.go — so the post-process handler can run the
+	// same pattern.
+	stopHeartbeat := startKnowledgeHeartbeat(ctx, s.repo, knowledge.ID)
+	defer stopHeartbeat()
 
 	// Get embedding model for vectorization — only needed when vector/keyword indexing is enabled
 	var embeddingModel embedding.Embedder
@@ -446,6 +458,15 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		return
 	}
 
+	// Mark progress so the reconciler/UI sees concrete numbers and the
+	// heartbeat advances past the initial transition timestamp.
+	if err := s.repo.SetChunkProgress(ctx, knowledge.ID, len(textChunks), len(textChunks)); err != nil {
+		logger.GetLogger(ctx).WithField("error", err).Warnf("processChunks set chunk progress failed")
+	}
+	if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
+		logger.GetLogger(ctx).WithField("error", err).Warnf("processChunks heartbeat failed")
+	}
+
 	// Create index information and perform vector indexing — only when vector/keyword is enabled.
 	// Chunks are ALWAYS saved to DB (above) because wiki and graph need them even without vector indexing.
 	var totalStorageSize int64
@@ -587,9 +608,18 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		langfuse.InjectTracing(ctx, &postProcessPayload)
 		payloadBytes, err := json.Marshal(postProcessPayload)
 		if err == nil {
-			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+			// Bound the post-process task explicitly. Without this Asynq falls
+			// back to its 30-min default which is too tight for large docs +
+			// long Q-gen chains; 30m is comfortable for 99% of observed runs
+			// and bounds blast radius if a worker wedges.
+			task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes,
+				asynq.Queue("default"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 			if _, err := s.task.Enqueue(task); err != nil {
-				logger.Errorf(ctx, "Failed to enqueue knowledge post process task: %v", err)
+				if IsTaskIDConflict(err) {
+					logger.Infof(ctx, "Post process task already queued for %s, skipping", knowledge.ID)
+				} else {
+					logger.Errorf(ctx, "Failed to enqueue knowledge post process task: %v", err)
+				}
 			} else {
 				logger.Infof(ctx, "Enqueued knowledge post process task for %s", knowledge.ID)
 			}
@@ -661,15 +691,54 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 	// document, then enrich with image info in a second pass. Enrichment must
 	// happen AFTER concatenation because StartAt is based on original document
 	// offsets — enriched (longer) content would break the positioning.
-	chunkContents := ""
+	//
+	// Pre-allocate a rune buffer so each chunk is placed via copy() instead
+	// of rebuilding the entire string per iteration. Previous shape was
+	// O(N²) in chunk count; now O(total runes).
+	//
+	// The initial capacity is bounded by 2× total content rune count to
+	// guard against a corrupt chunk.EndAt (e.g. a botched migration) that
+	// would otherwise prompt a multi-gigabyte allocation here. Legitimate
+	// gaps from overlap/reordering fit comfortably inside that budget;
+	// the in-range branch below grows the buffer as needed for any chunk
+	// that actually references a higher offset.
+	maxEnd := 0
+	totalContentRunes := 0
 	for _, chunk := range sortedChunks {
-		runes := []rune(chunkContents)
-		if chunk.StartAt <= len(runes) {
-			chunkContents = string(runes[:chunk.StartAt]) + chunk.Content
+		if chunk.EndAt > maxEnd {
+			maxEnd = chunk.EndAt
+		}
+		totalContentRunes += utf8.RuneCountInString(chunk.Content)
+	}
+	allocCap := maxEnd
+	if budget := totalContentRunes * 2; budget > 0 && allocCap > budget {
+		allocCap = budget
+	}
+	buf := make([]rune, 0, allocCap)
+	for _, chunk := range sortedChunks {
+		chunkRunes := []rune(chunk.Content)
+		if chunk.StartAt <= len(buf) {
+			// In-range: overwrite from StartAt and extend the slice if the
+			// chunk runs past the current tail. Mirrors the legacy
+			// `runes[:StartAt] + chunk.Content` truncate-then-append.
+			needed := chunk.StartAt + len(chunkRunes)
+			if needed > cap(buf) {
+				newBuf := make([]rune, needed)
+				copy(newBuf, buf)
+				buf = newBuf
+			} else if needed > len(buf) {
+				buf = buf[:needed]
+			}
+			copy(buf[chunk.StartAt:], chunkRunes)
 		} else {
-			chunkContents = chunkContents + chunk.Content
+			// Gap: legacy behaviour appended literally and ignored the
+			// gap, so a chunk with StartAt > len(buf) lands directly
+			// after the existing content rather than at its absolute
+			// offset. Preserved verbatim.
+			buf = append(buf, chunkRunes...)
 		}
 	}
+	chunkContents := string(buf)
 
 	// Collect image_info from image_ocr/image_caption children and enrich
 	chunkIDs := make([]string, len(sortedChunks))
@@ -712,7 +781,9 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 		"language": types.LanguageNameFromContext(ctx),
 	})
 	thinking := false
-	summary, err := summaryModel.Chat(ctx, []chat.Message{
+	callCtx, cancel := context.WithTimeout(ctx, llmCallTimeout())
+	defer cancel()
+	summary, err := summaryModel.Chat(callCtx, []chat.Message{
 		{
 			Role:    "system",
 			Content: summaryPrompt,
@@ -811,6 +882,14 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge: %v", err)
+		return nil
+	}
+
+	// Idempotency: a retry of an orphaned-and-requeued summary task could
+	// re-run the entire LLM pipeline against an already-summarised
+	// knowledge. Bail out if SummaryStatus is already terminal.
+	if knowledge.SummaryStatus == types.SummaryStatusCompleted {
+		logger.Infof(ctx, "Summary already completed for %s, skipping", payload.KnowledgeID)
 		return nil
 	}
 
@@ -1153,79 +1232,208 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		return chunk.Content
 	}
 
-	// Generate questions for each chunk with context
-	var indexInfoList []*types.IndexInfo
+	// Initial AIGS progress so the reconciler/UI sees the planned total.
+	if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, 0, len(textChunks)); err != nil {
+		logger.Warnf(ctx, "Failed to set initial AIGS progress: %v", err)
+	}
+
+	// Pre-pass: classify each chunk as either
+	//   - skip (empty content),
+	//   - already-fully-done (questions present + already indexed) → no LLM, no re-index,
+	//   - questions-only-need-indexing (questions present but QuestionsIndexedAt == 0,
+	//     e.g. previous BatchIndex failed and the task got retried) → reuse existing
+	//     questions, just add to indexInfoList,
+	//   - todo (run LLM).
+	//
+	// Without this idempotency check, every retry of an exhausted task
+	// regenerates ALL questions and writes duplicate index entries.
+	type qgWorkItem struct {
+		i           int
+		chunk       *types.Chunk
+		prev        string
+		next        string
+		needsLLM    bool
+		needsIndex  bool
+		needsTouch  bool // whether to mark QuestionsIndexedAt after batch index
+		preExisting []types.GeneratedQuestion
+	}
+	work := make([]*qgWorkItem, 0, len(textChunks))
+	skippedAlreadyDone := 0
 	for i, chunk := range textChunks {
 		if strings.TrimSpace(chunk.Content) == "" {
 			emptyContentChunks++
 			continue
 		}
-
-		// Build context from adjacent chunks
-		var prevContent, nextContent string
+		existingMeta, _ := chunk.DocumentMetadata()
+		hasEnoughQuestions := existingMeta != nil && len(existingMeta.GeneratedQuestions) >= questionCount
+		alreadyIndexed := existingMeta != nil && existingMeta.QuestionsIndexedAt > 0
+		if hasEnoughQuestions && alreadyIndexed {
+			skippedAlreadyDone++
+			continue
+		}
+		var prev, next string
 		if i > 0 {
-			prevContent = enrichContent(textChunks[i-1])
+			prev = enrichContent(textChunks[i-1])
 		}
 		if i < len(textChunks)-1 {
-			nextContent = enrichContent(textChunks[i+1])
+			next = enrichContent(textChunks[i+1])
 		}
-
-		llmCallAttempts++
-		questions, err := s.generateQuestionsWithContext(ctx, chatModel, enrichContent(chunk), prevContent, nextContent, knowledge.Title, questionCount)
-		if err != nil {
-			llmCallFailed++
-			logger.Warnf(ctx, "Failed to generate questions for chunk %s: %v", chunk.ID, err)
-			continue
+		item := &qgWorkItem{i: i, chunk: chunk, prev: prev, next: next}
+		if hasEnoughQuestions {
+			// Reuse existing questions; just need to (re-)index them.
+			item.preExisting = existingMeta.GeneratedQuestions
+			item.needsIndex = true
+			item.needsTouch = true
+		} else {
+			item.needsLLM = true
+			item.needsIndex = true
+			item.needsTouch = true
 		}
-
-		if len(questions) == 0 {
-			llmCallEmpty++
-			continue
-		}
-		llmCallSuccess++
-		generatedQuestionsTotal += len(questions)
-
-		// Update chunk metadata with unique IDs for each question
-		generatedQuestions := make([]types.GeneratedQuestion, len(questions))
-		for j, question := range questions {
-			questionID := fmt.Sprintf("q%d", time.Now().UnixNano()+int64(j))
-			generatedQuestions[j] = types.GeneratedQuestion{
-				ID:       questionID,
-				Question: question,
-			}
-		}
-		meta := &types.DocumentChunkMetadata{
-			GeneratedQuestions: generatedQuestions,
-		}
-		if err := chunk.SetDocumentMetadata(meta); err != nil {
-			chunkMetadataSetFailed++
-			logger.Warnf(ctx, "Failed to set document metadata for chunk %s: %v", chunk.ID, err)
-			continue
-		}
-
-		// Update chunk in database
-		if err := s.chunkService.UpdateChunk(ctx, chunk); err != nil {
-			chunkUpdateFailed++
-			logger.Warnf(ctx, "Failed to update chunk %s: %v", chunk.ID, err)
-			continue
-		}
-
-		// Create index entries for generated questions
-		for _, gq := range generatedQuestions {
-			sourceID := fmt.Sprintf("%s-%s", chunk.ID, gq.ID)
-			indexInfoList = append(indexInfoList, &types.IndexInfo{
-				Content:         gq.Question,
-				SourceID:        sourceID,
-				SourceType:      types.ChunkSourceType,
-				ChunkID:         chunk.ID,
-				KnowledgeID:     knowledge.ID,
-				KnowledgeBaseID: knowledge.KnowledgeBaseID,
-				IsEnabled:       true,
-			})
-		}
-		logger.Debugf(ctx, "Generated %d questions for chunk %s", len(questions), chunk.ID)
+		work = append(work, item)
 	}
+	if skippedAlreadyDone > 0 {
+		logger.Infof(ctx, "[QG] Skipping %d chunks already fully done (idempotent retry)", skippedAlreadyDone)
+	}
+
+	// Run the LLM phase in bounded parallelism. Default = 1 to preserve
+	// the old sequential behaviour exactly: an upgrade should not change
+	// LLM call rates that operators may have tuned around (cloud rate
+	// limits, Ollama OLLAMA_NUM_PARALLEL, GPU memory). Operators that
+	// know their endpoint handles parallelism opt in via
+	// WEKNORA_QG_CONCURRENCY=4..16.
+	concurrency := envIntDefault("WEKNORA_QG_CONCURRENCY", 1)
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	var (
+		mu                  sync.Mutex
+		indexInfoList       []*types.IndexInfo
+		touchedChunks       []*types.Chunk // chunks whose metadata was updated and should get QuestionsIndexedAt set after BatchIndex
+		processedCount      int
+		progressMu          sync.Mutex // guards lastWrittenProgress; held only across the in-memory check, NOT during the DB write
+		lastWrittenProgress int
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
+	for _, item := range work {
+		item := item
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return nil
+			}
+			var generatedQuestions []types.GeneratedQuestion
+			if item.needsLLM {
+				mu.Lock()
+				llmCallAttempts++
+				mu.Unlock()
+				questions, err := s.generateQuestionsWithContext(
+					gctx, chatModel, enrichContent(item.chunk),
+					item.prev, item.next, knowledge.Title, questionCount,
+				)
+				if err != nil {
+					mu.Lock()
+					llmCallFailed++
+					mu.Unlock()
+					logger.Warnf(gctx, "Failed to generate questions for chunk %s: %v", item.chunk.ID, err)
+					return nil // Don't fail siblings on a single chunk error
+				}
+				if len(questions) == 0 {
+					mu.Lock()
+					llmCallEmpty++
+					mu.Unlock()
+					return nil
+				}
+				generatedQuestions = make([]types.GeneratedQuestion, len(questions))
+				for j, q := range questions {
+					generatedQuestions[j] = types.GeneratedQuestion{
+						ID:       fmt.Sprintf("q%d", time.Now().UnixNano()+int64(j)),
+						Question: q,
+					}
+				}
+				meta := &types.DocumentChunkMetadata{GeneratedQuestions: generatedQuestions}
+				if err := item.chunk.SetDocumentMetadata(meta); err != nil {
+					mu.Lock()
+					chunkMetadataSetFailed++
+					mu.Unlock()
+					logger.Warnf(gctx, "Failed to set document metadata for chunk %s: %v", item.chunk.ID, err)
+					return nil
+				}
+				if err := s.chunkService.UpdateChunk(gctx, item.chunk); err != nil {
+					mu.Lock()
+					chunkUpdateFailed++
+					mu.Unlock()
+					logger.Warnf(gctx, "Failed to update chunk %s: %v", item.chunk.ID, err)
+					return nil
+				}
+				mu.Lock()
+				llmCallSuccess++
+				generatedQuestionsTotal += len(generatedQuestions)
+				mu.Unlock()
+			} else {
+				generatedQuestions = item.preExisting
+			}
+
+			// Build index entries for this chunk's questions.
+			entries := make([]*types.IndexInfo, 0, len(generatedQuestions))
+			for _, gq := range generatedQuestions {
+				entries = append(entries, &types.IndexInfo{
+					Content:         gq.Question,
+					SourceID:        fmt.Sprintf("%s-%s", item.chunk.ID, gq.ID),
+					SourceType:      types.ChunkSourceType,
+					ChunkID:         item.chunk.ID,
+					KnowledgeID:     knowledge.ID,
+					KnowledgeBaseID: knowledge.KnowledgeBaseID,
+					IsEnabled:       true,
+				})
+			}
+			mu.Lock()
+			indexInfoList = append(indexInfoList, entries...)
+			if item.needsTouch {
+				touchedChunks = append(touchedChunks, item.chunk)
+			}
+			processedCount++
+			localProgress := processedCount
+			mu.Unlock()
+
+			// Progress / heartbeat every 50 processed items. The DB
+			// writes happen OUTSIDE the worker mutex so a stalled DB
+			// can never deadlock the worker pool. progressMu protects
+			// only the in-memory "what's the latest value we've decided
+			// to write" check — also released before the DB call.
+			if localProgress%50 == 0 {
+				progressMu.Lock()
+				shouldWrite := localProgress > lastWrittenProgress
+				if shouldWrite {
+					lastWrittenProgress = localProgress
+				}
+				progressMu.Unlock()
+				if shouldWrite {
+					if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, localProgress, len(work)); err != nil {
+						logger.Warnf(ctx, "Failed to update AIGS progress at chunk %d: %v", localProgress, err)
+					}
+					if err := s.repo.TouchProcessingHeartbeat(ctx, knowledge.ID); err != nil {
+						logger.Warnf(ctx, "Failed to heartbeat at chunk %d: %v", localProgress, err)
+					}
+				}
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
 	indexEntriesPrepared = len(indexInfoList)
+	// Final progress update so the row matches the planned total even
+	// when some items hit per-chunk errors and didn't increment.
+	if err := s.repo.SetAIGSProgress(ctx, knowledge.ID, len(textChunks), len(textChunks)); err != nil {
+		logger.Warnf(ctx, "Failed to finalize AIGS progress: %v", err)
+	}
+
+	// Bail out if too many chunks failed: re-running the task is cheaper
+	// than producing a half-indexed knowledge.
+	if llmCallAttempts > 0 && llmCallFailed*10 > llmCallAttempts {
+		exitStatus = "too_many_llm_failures"
+		return fmt.Errorf("too many LLM failures: %d/%d", llmCallFailed, llmCallAttempts)
+	}
 
 	// Index generated questions
 	if len(indexInfoList) > 0 {
@@ -1237,6 +1445,24 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		}
 		indexBatchSucceeded = true
 		logger.Infof(ctx, "Successfully indexed %d generated questions for knowledge: %s", len(indexInfoList), payload.KnowledgeID)
+
+		// Mark all touched chunks as fully indexed so a future retry
+		// short-circuits in the pre-pass.
+		nowTS := time.Now().Unix()
+		for _, c := range touchedChunks {
+			meta, _ := c.DocumentMetadata()
+			if meta == nil {
+				continue
+			}
+			meta.QuestionsIndexedAt = nowTS
+			if err := c.SetDocumentMetadata(meta); err != nil {
+				logger.Warnf(ctx, "Failed to stamp QuestionsIndexedAt on chunk %s: %v", c.ID, err)
+				continue
+			}
+			if err := s.chunkService.UpdateChunk(ctx, c); err != nil {
+				logger.Warnf(ctx, "Failed to persist QuestionsIndexedAt for chunk %s: %v", c.ID, err)
+			}
+		}
 	}
 
 	return nil
@@ -1278,7 +1504,9 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 	})
 
 	thinking := false
-	response, err := chatModel.Chat(ctx, []chat.Message{
+	callCtx, cancel := context.WithTimeout(ctx, llmCallTimeout())
+	defer cancel()
+	response, err := chatModel.Chat(callCtx, []chat.Message{
 		{
 			Role:    "user",
 			Content: prompt,
@@ -1350,6 +1578,15 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return nil, werrors.NewBadRequestError("无法获取手工知识内容")
 		}
 
+		// Same rationale as the non-manual path below: kill any stale
+		// task with the deterministic ID so our fresh enqueue wins.
+		// If a worker is *currently* running the old task, abort —
+		// destroying state under a live worker corrupts the run.
+		if err := killTaskByDeterministicID(ManualProcessTaskID(knowledgeID)); err != nil {
+			logger.Warnf(ctx, "Reparse aborted: stale task is still active for %s: %v", knowledgeID, err)
+			return nil, werrors.NewBadRequestError("Knowledge wird gerade verarbeitet, bitte erneut versuchen")
+		}
+
 		existing.ParseStatus = "pending"
 		existing.EnableStatus = "disabled"
 		existing.Description = ""
@@ -1368,6 +1605,19 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			s.repo.UpdateKnowledge(ctx, existing)
 		}
 		return existing, nil
+	}
+
+	// User explicitly asked to reparse. If a previous task with the
+	// same deterministic ID is still pending/scheduled/retrying, our
+	// fresh Enqueue would silently no-op via ErrTaskIDConflict and the
+	// stale task would run with a now-cleaned knowledge. Kill it first
+	// so the new Enqueue actually wins. Active (running) tasks CAN'T
+	// be deleted — destroying chunks/index under a live worker leads
+	// to data corruption, so we abort the reparse and tell the caller
+	// to retry once the worker finishes.
+	if err := killTaskByDeterministicID(DocProcessTaskID(knowledgeID)); err != nil {
+		logger.Warnf(ctx, "Reparse aborted: stale task is still active for %s: %v", knowledgeID, err)
+		return nil, werrors.NewBadRequestError("Knowledge wird gerade verarbeitet, bitte erneut versuchen")
 	}
 
 	// For non-manual knowledge, cleanup synchronously then enqueue document processing
@@ -1432,9 +1682,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(existing.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "Reparse task already queued for %s, skipping", existing.ID)
+				return existing, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue reparse task: %v", err)
 			return existing, nil
 		}
@@ -1485,9 +1740,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(existing.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "File URL reparse task already queued for %s, skipping", existing.ID)
+				return existing, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue file URL reparse task: %v", err)
 			return existing, nil
 		}
@@ -1531,9 +1791,14 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			return existing, nil
 		}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
+			docProcessOpts(asynq.TaskID(DocProcessTaskID(existing.ID)))...)
 		info, err := s.task.Enqueue(task)
 		if err != nil {
+			if IsTaskIDConflict(err) {
+				logger.Infof(ctx, "URL reparse task already queued for %s, skipping", existing.ID)
+				return existing, nil
+			}
 			logger.Errorf(ctx, "Failed to enqueue URL reparse task: %v", err)
 			return existing, nil
 		}
@@ -1921,7 +2186,9 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	}
 
 	knowledge.ParseStatus = "processing"
-	knowledge.UpdatedAt = time.Now()
+	now := time.Now()
+	knowledge.UpdatedAt = now
+	knowledge.ProcessingStartedAt = &now
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		logger.Errorf(ctx, "failed to update knowledge status to processing: %v", err)
 		return nil
@@ -2409,7 +2676,7 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 			continue
 		}
 
-		task := asynq.NewTask(types.TypeImageMultimodal, payloadBytes)
+		task := asynq.NewTask(types.TypeImageMultimodal, payloadBytes, imageMultimodalOpts()...)
 		if _, err := s.task.Enqueue(task); err != nil {
 			logger.Warnf(ctx, "Failed to enqueue image multimodal task for %s: %v", img.ServingURL, err)
 		} else {
@@ -2417,3 +2684,4 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 		}
 	}
 }
+

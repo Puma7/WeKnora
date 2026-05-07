@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	stderrors "errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +33,7 @@ type KnowledgeBaseHandler struct {
 	agentShareService   interfaces.AgentShareService
 	kbPermissionService interfaces.KBPermissionService
 	asynqClient         interfaces.TaskEnqueuer
+	knowledgeRepo       interfaces.KnowledgeRepository
 }
 
 // NewKnowledgeBaseHandler creates a new knowledge base handler instance
@@ -41,6 +44,7 @@ func NewKnowledgeBaseHandler(
 	agentShareService interfaces.AgentShareService,
 	kbPermissionService interfaces.KBPermissionService,
 	asynqClient interfaces.TaskEnqueuer,
+	knowledgeRepo interfaces.KnowledgeRepository,
 ) *KnowledgeBaseHandler {
 	return &KnowledgeBaseHandler{
 		service:             service,
@@ -49,6 +53,7 @@ func NewKnowledgeBaseHandler(
 		agentShareService:   agentShareService,
 		kbPermissionService: kbPermissionService,
 		asynqClient:         asynqClient,
+		knowledgeRepo:       knowledgeRepo,
 	}
 }
 
@@ -983,4 +988,219 @@ func (h *KnowledgeBaseHandler) ListMoveTargets(c *gin.Context) {
 		"success": true,
 		"data":    targets,
 	})
+}
+
+// RecoverKnowledgeBase godoc
+// @Summary      Recover stuck/failed knowledge in a KB
+// @Description  Requeues archived asynq tasks for this knowledge base and
+//               (with include_failed=1) reparses every Knowledge currently
+//               in parse_status='failed'. Admin-only.
+// @Tags         知识库
+// @Produce      json
+// @Param        id              path  string  true   "KB ID"
+// @Param        include_failed  query string  false  "1 to also reparse failed knowledge"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  errors.AppError
+// @Failure      403  {object}  errors.AppError
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/recover [post]
+func (h *KnowledgeBaseHandler) RecoverKnowledgeBase(c *gin.Context) {
+	ctx := c.Request.Context()
+	logger.Info(ctx, "Start KB recovery")
+
+	kb, kbID, _, role, err := h.validateAndGetKnowledgeBase(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if role != types.OrgRoleAdmin {
+		c.Error(apperrors.NewForbiddenError("Admin permission required for recovery"))
+		return
+	}
+	includeFailed := c.Query("include_failed") == "1"
+
+	// Lite-mode (no Redis) has no archive to scan; fall through to the
+	// failed-reparse path only.
+	var requeued, skippedNotInKB int
+	var archivedRemaining int
+	if os.Getenv("REDIS_ADDR") != "" {
+		inspector := asynq.NewInspector(buildAsynqRedisOpt())
+		defer inspector.Close()
+		queues := []string{"critical", "default", "low"}
+		for _, q := range queues {
+			rq, _, ar, err := requeueArchivedForKB(ctx, inspector, q, kbID)
+			if err != nil {
+				logger.Warnf(ctx, "[Recover] %s queue scan failed: %v", q, err)
+				continue
+			}
+			requeued += rq
+			archivedRemaining += ar
+		}
+	}
+
+	// Bound the synchronous reparse work per request so the HTTP call
+	// can't spend minutes serially calling cleanupKnowledgeResources +
+	// Enqueue for thousands of failed rows. Reverse proxies time out
+	// long before that. User can call /recover repeatedly until
+	// failed_remaining == 0.
+	const reparseBudget = 100
+	var reparsedFailed, reparsedFailedErrs, failedRemaining int
+	if includeFailed && h.knowledgeRepo != nil && h.knowledgeService != nil {
+		all, err := h.knowledgeRepo.ListKnowledgeByKnowledgeBaseID(ctx, kb.TenantID, kbID)
+		if err != nil {
+			logger.Warnf(ctx, "[Recover] list failed knowledge: %v", err)
+		} else {
+			for _, k := range all {
+				if k.ParseStatus != types.ParseStatusFailed {
+					continue
+				}
+				if reparsedFailed+reparsedFailedErrs >= reparseBudget {
+					failedRemaining++
+					continue
+				}
+				reparseCtx := context.WithValue(ctx, types.TenantIDContextKey, k.TenantID)
+				if _, err := h.knowledgeService.ReparseKnowledge(reparseCtx, k.ID); err != nil {
+					reparsedFailedErrs++
+					logger.Warnf(ctx, "[Recover] reparse %s: %v", k.ID, err)
+					continue
+				}
+				reparsedFailed++
+			}
+		}
+	}
+
+	logger.Infof(ctx,
+		"[Recover] KB %s done: requeued=%d archived_remaining=%d reparsed_failed=%d errs=%d failed_remaining=%d",
+		kbID, requeued, archivedRemaining, reparsedFailed, reparsedFailedErrs, failedRemaining,
+	)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"kb_id":               kbID,
+			"requeued":            requeued,
+			"archived_remaining":  archivedRemaining,
+			"skipped_not_in_kb":   skippedNotInKB,
+			"reparsed_failed":     reparsedFailed,
+			"reparse_failed_errs": reparsedFailedErrs,
+			"failed_remaining":    failedRemaining,
+			"include_failed":      includeFailed,
+		},
+	})
+}
+
+// buildAsynqRedisOpt mirrors router.getAsynqRedisClientOpt; duplicated
+// here to avoid an import cycle (handler is imported by router).
+func buildAsynqRedisOpt() *asynq.RedisClientOpt {
+	db := 0
+	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
+		if parsed, err := strconv.Atoi(dbStr); err == nil {
+			db = parsed
+		}
+	}
+	readMs, writeMs := 3000, 3000
+	if v := os.Getenv("WEKNORA_REDIS_READ_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			readMs = n
+		}
+	}
+	if v := os.Getenv("WEKNORA_REDIS_WRITE_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			writeMs = n
+		}
+	}
+	return &asynq.RedisClientOpt{
+		Addr:         os.Getenv("REDIS_ADDR"),
+		Username:     os.Getenv("REDIS_USERNAME"),
+		Password:     os.Getenv("REDIS_PASSWORD"),
+		ReadTimeout:  time.Duration(readMs) * time.Millisecond,
+		WriteTimeout: time.Duration(writeMs) * time.Millisecond,
+		DB:           db,
+	}
+}
+
+// requeueArchivedForKB inspects the archive of a queue, decodes each
+// archived task's payload as a known type, and if its KnowledgeBaseID
+// matches kbID, RunTasks it (moves back to pending). Returns
+// (requeued, skipped_not_in_kb, remaining, error).
+func requeueArchivedForKB(
+	ctx context.Context, inspector *asynq.Inspector, queue, kbID string,
+) (int, int, int, error) {
+	const pageSize = 100
+	var requeued, skipped, remaining int
+	page := 1
+	for {
+		opts := []asynq.ListOption{asynq.PageSize(pageSize), asynq.Page(page)}
+		tasks, err := inspector.ListArchivedTasks(queue, opts...)
+		if err != nil {
+			return requeued, skipped, remaining, err
+		}
+		if len(tasks) == 0 {
+			break
+		}
+		for _, t := range tasks {
+			matches, err := payloadMatchesKB(t.Type, t.Payload, kbID)
+			if err != nil || !matches {
+				if err == nil && !matches {
+					skipped++
+				}
+				remaining++
+				continue
+			}
+			if err := inspector.RunTask(queue, t.ID); err != nil {
+				logger.Warnf(ctx, "[Recover] RunTask %s/%s failed: %v", queue, t.ID, err)
+				remaining++
+				continue
+			}
+			requeued++
+		}
+		if len(tasks) < pageSize {
+			break
+		}
+		page++
+		if page > 50 {
+			// safety: don't iterate forever on huge archives
+			break
+		}
+	}
+	return requeued, skipped, remaining, nil
+}
+
+// payloadMatchesKB best-effort decodes a task payload to check whether
+// it belongs to the requested KB. Returns true on a positive match.
+// Unknown task types fall through and are not requeued (safer default).
+func payloadMatchesKB(taskType string, payload []byte, kbID string) (bool, error) {
+	switch taskType {
+	case types.TypeDocumentProcess:
+		var p types.DocumentProcessPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return false, err
+		}
+		return p.KnowledgeBaseID == kbID, nil
+	case types.TypeQuestionGeneration:
+		var p types.QuestionGenerationPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return false, err
+		}
+		return p.KnowledgeBaseID == kbID, nil
+	case types.TypeSummaryGeneration:
+		var p types.SummaryGenerationPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return false, err
+		}
+		return p.KnowledgeBaseID == kbID, nil
+	case types.TypeKnowledgePostProcess:
+		var p types.KnowledgePostProcessPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return false, err
+		}
+		return p.KnowledgeBaseID == kbID, nil
+	case types.TypeManualProcess:
+		var p types.ManualProcessPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return false, err
+		}
+		return p.KnowledgeBaseID == kbID, nil
+	}
+	return false, nil
 }

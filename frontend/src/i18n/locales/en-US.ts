@@ -941,6 +941,12 @@ export default {
     rerankModelLabel: 'Rerank Model',
     rerankModelDescription: 'Select the model for reranking search results',
     rerankModelRequired: 'Please select a Rerank model. Search requires this model to rerank results.',
+    rrfKLabel: 'RRF Smoothing Constant (k)',
+    rrfKDescription: 'Reciprocal Rank Fusion smoothing constant. Higher values flatten the bias toward top results (default 60, useful range 30-100).',
+    rrfVectorWeightLabel: 'RRF Vector Weight',
+    rrfVectorWeightDescription: 'Weight applied to vector retrieval inside RRF. Usually sums with the keyword weight to 1.0 (default 0.7).',
+    rrfKeywordWeightLabel: 'RRF Keyword Weight',
+    rrfKeywordWeightDescription: 'Weight applied to keyword retrieval inside RRF (default 0.3).',
     toasts: {
       saveSuccess: 'Retrieval configuration saved',
       saveFailed: 'Failed to save configuration: {message}',
@@ -2008,7 +2014,7 @@ export default {
       childChunkSizeDescription: 'Size of the embedded chunk used for vector match (64–2048). Default 384 ≈ 80 tokens — sweet spot for sentence-transformer / BGE-style embedders.',
       strategyLabel: 'Chunking Strategy',
       strategyDescription: 'Choose how documents are split into chunks. The Automatic mode profiles each document and picks the best strategy.',
-      strategyPlaceholder: 'Select strategy (defaults to classic recursive splitting)',
+      strategyPlaceholder: 'Select a chunking strategy (splits by length if left empty)',
       strategies: {
         auto: {
           label: 'Automatic',
@@ -2040,7 +2046,7 @@ export default {
         zh: 'Chinese'
       },
       debug: {
-        toggle: 'Test with sample text',
+        toggle: 'Preview chunking',
         toggleHint: 'Run the chunker against sample text without re-uploading',
         sampleLabel: 'Sample text',
         samplePlaceholder: 'Paste a Markdown / plain-text snippet to see how the current configuration would chunk it…',

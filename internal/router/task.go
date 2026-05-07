@@ -1,10 +1,12 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service"
@@ -28,6 +30,30 @@ type AsynqTaskParams struct {
 	ImageMultimodal      interfaces.TaskHandler `name:"imageMultimodal"`
 	KnowledgePostProcess interfaces.TaskHandler `name:"knowledgePostProcess"`
 	WikiIngest           interfaces.TaskHandler `name:"wikiIngest"`
+	Reconciler           *service.KnowledgeReconciler
+}
+
+// AsynqRedisConnOpt exposes the Redis connection options as the
+// asynq.RedisConnOpt interface so other components (notably the
+// KnowledgeReconciler's *asynq.Inspector) can connect to the same
+// broker without re-reading env vars.
+func AsynqRedisConnOpt() asynq.RedisConnOpt {
+	return getAsynqRedisClientOpt()
+}
+
+// envIntDefault reads an integer from an env var, falling back to def when
+// unset, empty, or unparseable. Negative values also fall back to keep
+// callers from accidentally configuring poison values.
+func envIntDefault(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed < 0 {
+		return def
+	}
+	return parsed
 }
 
 func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
@@ -37,12 +63,19 @@ func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
 			db = parsed
 		}
 	}
+	// Default timeouts were 100ms read / 200ms write — too tight under load:
+	// a brief Redis stall (GC pause, network hiccup, large pending list scan)
+	// surfaces as spurious task fetch failures and asynq heartbeat misses.
+	// 3s gives ample headroom while staying well below any reasonable task
+	// timeout. Override via WEKNORA_REDIS_*_TIMEOUT_MS if needed.
+	readTimeoutMs := envIntDefault("WEKNORA_REDIS_READ_TIMEOUT_MS", 3000)
+	writeTimeoutMs := envIntDefault("WEKNORA_REDIS_WRITE_TIMEOUT_MS", 3000)
 	opt := &asynq.RedisClientOpt{
 		Addr:         os.Getenv("REDIS_ADDR"),
 		Username:     os.Getenv("REDIS_USERNAME"),
 		Password:     os.Getenv("REDIS_PASSWORD"),
-		ReadTimeout:  100 * time.Millisecond,
-		WriteTimeout: 200 * time.Millisecond,
+		ReadTimeout:  time.Duration(readTimeoutMs) * time.Millisecond,
+		WriteTimeout: time.Duration(writeTimeoutMs) * time.Millisecond,
 		DB:           db,
 	}
 	return opt
@@ -83,9 +116,16 @@ func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 
 func NewAsynqServer() *asynq.Server {
 	opt := getAsynqRedisClientOpt()
+	// Concurrency = total number of worker goroutines across all queues;
+	// the priority weights below only govern dispatch ratio. asynq's own
+	// default (when Concurrency=0) is runtime.NumCPU() — see asynq
+	// server.go:451. We pass 0 by default so high-core hosts use all
+	// available cores. Set WEKNORA_ASYNQ_CONCURRENCY=N to pin to N.
+	concurrency := envIntDefault("WEKNORA_ASYNQ_CONCURRENCY", 0)
 	srv := asynq.NewServer(
 		opt,
 		asynq.Config{
+			Concurrency: concurrency,
 			Queues: map[string]int{
 				"critical": 6, // Highest priority queue
 				"default":  3, // Default priority queue
@@ -161,5 +201,15 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 			log.Fatalf("could not run server: %v", err)
 		}
 	}()
+
+	// Start the KnowledgeReconciler in the background. It detects rows
+	// stuck in parse_status='processing' that no longer have a live
+	// asynq task — e.g. because asynq exhausted retries (archived) or
+	// the worker process crashed mid-execution before lease renewal.
+	// Without this, such rows stay "processing" forever in Redis mode.
+	if params.Reconciler != nil {
+		go params.Reconciler.Run(context.Background())
+	}
+
 	return mux
 }

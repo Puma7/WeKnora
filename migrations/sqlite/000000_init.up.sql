@@ -103,7 +103,15 @@ CREATE TABLE IF NOT EXISTS knowledges (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     processed_at DATETIME,
     error_message TEXT,
-    deleted_at DATETIME
+    deleted_at DATETIME,
+    -- Synced with versioned/000040_knowledge_progress_and_heartbeat.up.sql.
+    -- The reconciler / heartbeat code in service paths writes these even
+    -- in Lite mode, so SQLite needs them too.
+    processing_started_at DATETIME,
+    chunks_total INTEGER NOT NULL DEFAULT 0,
+    chunks_done INTEGER NOT NULL DEFAULT 0,
+    aigs_chunks_total INTEGER NOT NULL DEFAULT 0,
+    aigs_chunks_done INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledges_tenant_id ON knowledges(tenant_id);
@@ -112,6 +120,9 @@ CREATE INDEX IF NOT EXISTS idx_knowledges_parse_status ON knowledges(parse_statu
 CREATE INDEX IF NOT EXISTS idx_knowledges_enable_status ON knowledges(enable_status);
 CREATE INDEX IF NOT EXISTS idx_knowledges_tag ON knowledges(tag_id);
 CREATE INDEX IF NOT EXISTS idx_knowledges_summary_status ON knowledges(summary_status);
+CREATE INDEX IF NOT EXISTS idx_knowledges_parse_status_started
+    ON knowledges (parse_status, processing_started_at)
+    WHERE parse_status IN ('processing', 'pending');
 
 CREATE TABLE IF NOT EXISTS sessions (
     id VARCHAR(36) PRIMARY KEY,

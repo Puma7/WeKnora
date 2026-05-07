@@ -819,6 +819,12 @@ export default {
     rerankModelLabel: "Rerank 모델",
     rerankModelDescription: "검색 결과 재정렬에 사용할 모델을 선택하세요",
     rerankModelRequired: "Rerank 모델을 선택하세요. 검색 기능에 이 모델이 필요합니다.",
+    rrfKLabel: "RRF 평활 상수 (k)",
+    rrfKDescription: "역수 순위 융합의 평활 상수. 값이 클수록 상위 결과에 대한 편향이 완화됩니다 (기본값 60, 권장 범위 30-100).",
+    rrfVectorWeightLabel: "RRF 벡터 가중치",
+    rrfVectorWeightDescription: "RRF 융합에서 벡터 검색에 적용되는 가중치. 일반적으로 키워드 가중치와 합이 1.0이 됩니다 (기본값 0.7).",
+    rrfKeywordWeightLabel: "RRF 키워드 가중치",
+    rrfKeywordWeightDescription: "RRF 융합에서 키워드 검색에 적용되는 가중치 (기본값 0.3).",
     toasts: {
       saveSuccess: "검색 설정이 저장되었습니다",
       saveFailed: "설정 저장 실패: {message}",
@@ -2530,7 +2536,7 @@ export default {
       childChunkSizeDescription: "벡터 매칭에 사용되는 임베딩 청크 크기 (64-2048). 기본값 384 ≈ 80 토큰 — sentence-transformer / BGE 임베더의 최적점.",
       strategyLabel: "청킹 전략",
       strategyDescription: "문서를 청크로 분할하는 방법을 선택합니다. 자동 모드는 문서를 프로파일링하여 최적의 전략을 선택합니다.",
-      strategyPlaceholder: "전략 선택 (기본: 클래식 재귀 분할)",
+      strategyPlaceholder: "청킹 전략 선택 (비워 두면 길이로 분할)",
       strategies: {
         auto: {
           label: "자동",
@@ -2562,7 +2568,7 @@ export default {
         zh: "중국어"
       },
       debug: {
-        toggle: "샘플 텍스트로 테스트",
+        toggle: "청킹 결과 미리보기",
         toggleHint: "재업로드 없이 샘플 텍스트에 대해 청커 실행",
         sampleLabel: "샘플 텍스트",
         samplePlaceholder: "현재 구성으로 어떻게 청크되는지 보려면 Markdown / 일반 텍스트 스니펫을 붙여넣으세요…",

@@ -36,6 +36,13 @@ type DocumentChunkMetadata struct {
 	// GeneratedQuestions 存储AI为该Chunk生成的相关问题
 	// 这些问题会被独立索引以提高召回率
 	GeneratedQuestions []GeneratedQuestion `json:"generated_questions,omitempty"`
+	// QuestionsIndexedAt is the unix-second timestamp at which the
+	// questions were successfully written into the vector / keyword
+	// index. Set only after BatchIndex returns nil. The QG handler uses
+	// this as an idempotency sentinel so a retried task can skip chunks
+	// that already finished both generation AND indexing — without it
+	// every retry re-runs the full LLM loop and re-indexes duplicates.
+	QuestionsIndexedAt int64 `json:"questions_indexed_at,omitempty"`
 }
 
 // GetQuestionStrings 返回问题内容字符串列表（兼容旧代码）

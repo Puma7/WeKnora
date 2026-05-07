@@ -94,6 +94,11 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	logger.Infof(ctx, "Hybrid search parameters, knowledge base IDs: %v, query text: %s", searchKBIDs, params.QueryText)
 
 	tenantInfo, _ := types.TenantInfoFromContext(ctx)
+	// HybridSearch is invariant-protected at the route layer: every
+	// authenticated request has a tenant in context. We assume non-nil here
+	// (matching the existing GetEffectiveEngines call below) rather than
+	// pretending a half-defensive nil-check is meaningful.
+	retrievalCfg := tenantInfo.RetrievalConfig
 
 	// Create a composite retrieval engine with tenant's configured retrievers
 	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
@@ -110,9 +115,12 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		return nil, err
 	}
 
-	// Use 5x over-retrieval to ensure sufficient candidates for RRF fusion and reranking.
-	// Scale proportionally when searching multiple KBs to maintain per-KB recall quality.
-	matchCount := max(params.MatchCount*5, 50) * len(searchKBIDs)
+	// Over-retrieve to ensure RRF fusion and the reranker have enough
+	// candidates to work with. Multiplier is tenant-configurable (default 5)
+	// — raising it gives the reranker more long-tail recall at modest extra
+	// retrieval cost. Scale by KB count for multi-KB queries; cap at 500.
+	overRetrieveMultiplier := retrievalCfg.GetEffectiveOverRetrieveMultiplier()
+	matchCount := max(params.MatchCount*overRetrieveMultiplier, 50) * len(searchKBIDs)
 	if matchCount > 500 {
 		matchCount = 500
 	}
@@ -152,10 +160,6 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	}
 	logger.Infof(ctx, "Result count before fusion: vector=%d, keyword=%d", len(vectorResults), len(keywordResults))
 
-	var retrievalCfg *types.RetrievalConfig
-	if tenantInfo != nil {
-		retrievalCfg = tenantInfo.RetrievalConfig
-	}
 	deduplicatedChunks := fuseOrDeduplicate(ctx, vectorResults, keywordResults, retrievalCfg)
 
 	kb.EnsureDefaults()
