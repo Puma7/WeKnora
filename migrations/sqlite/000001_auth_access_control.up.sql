@@ -1,4 +1,4 @@
--- SQLite migration 000002: auth/access-control
+-- SQLite migration 000001: auth/access-control
 -- Mirrors migrations/versioned/000040 but uses SQLite-portable syntax.
 --
 -- SQLite-specific notes:

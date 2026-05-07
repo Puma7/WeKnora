@@ -1,4 +1,4 @@
--- SQLite migration 000002: rollback auth/access-control.
+-- SQLite migration 000001: rollback auth/access-control.
 -- SQLite doesn't support DROP COLUMN before 3.35; we accept the cost of leaving
 -- the columns in place on rollback. Tables are dropped cleanly.
 

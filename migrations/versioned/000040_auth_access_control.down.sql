@@ -1,5 +1,5 @@
--- Migration: 000042_auth_access_control (down)
-DO $$ BEGIN RAISE NOTICE '[Migration 000042] Rolling back auth/access-control setup...'; END $$;
+-- Migration: 000040_auth_access_control (down)
+DO $$ BEGIN RAISE NOTICE '[Migration 000040] Rolling back auth/access-control setup...'; END $$;
 
 DROP INDEX IF EXISTS idx_kb_user_permissions_deleted_at;
 DROP INDEX IF EXISTS idx_kb_user_permissions_tenant;
@@ -26,4 +26,4 @@ ALTER TABLE users
     DROP COLUMN IF EXISTS permissions,
     DROP COLUMN IF EXISTS role;
 
-DO $$ BEGIN RAISE NOTICE '[Migration 000042] Rollback completed'; END $$;
+DO $$ BEGIN RAISE NOTICE '[Migration 000040] Rollback completed'; END $$;

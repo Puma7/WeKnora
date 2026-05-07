@@ -499,6 +499,12 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	// Run database migrations automatically (optional, can be disabled via env var)
 	// To disable auto-migration, set AUTO_MIGRATE=false
 	// To enable auto-recovery from dirty state, set AUTO_RECOVER_DIRTY=true
+	// To make migration failures abort startup, set STRICT_MIGRATION=true
+	// (recommended for production; default keeps the legacy "warn and continue"
+	// behavior so existing deployments aren't suddenly hard-failed by an
+	// upgrade. With strict mode off, schema-mismatch errors only surface when
+	// the first request hits a missing column — set strict mode in prod to get
+	// the loud failure at boot instead.)
 	if os.Getenv("AUTO_MIGRATE") != "false" {
 		logger.Infof(context.Background(), "Running database migrations...")
 
@@ -508,14 +514,21 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 			SQLiteDBPath:     sqliteDBPath,
 		}
 
+		strictMigration := strings.EqualFold(os.Getenv("STRICT_MIGRATION"), "true")
+
 		// Run base migrations (all versioned migrations including embeddings)
 		// The embeddings migration will be conditionally executed based on skip_embedding parameter in DSN
 		if err := database.RunMigrationsWithOptions(migrateDSN, migrationOpts); err != nil {
-			// Log warning but don't fail startup - migrations might be handled externally
+			if strictMigration {
+				logger.Errorf(context.Background(), "Database migration failed (STRICT_MIGRATION=true): %v", err)
+				panic(fmt.Sprintf("database migration failed and STRICT_MIGRATION=true: %v", err))
+			}
+			// Legacy behavior: log warning but don't fail startup.
 			logger.Warnf(context.Background(), "Database migration failed: %v", err)
 			logger.Warnf(
 				context.Background(),
-				"Continuing with application startup. Please run migrations manually if needed.",
+				"Continuing with application startup. Please run migrations manually if needed. "+
+					"Set STRICT_MIGRATION=true to abort startup on migration errors instead.",
 			)
 		}
 
