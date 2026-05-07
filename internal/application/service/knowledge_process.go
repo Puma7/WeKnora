@@ -1242,11 +1242,13 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		logger.Infof(ctx, "[QG] Skipping %d chunks already fully done (idempotent retry)", skippedAlreadyDone)
 	}
 
-	// Run the LLM phase in bounded parallelism. Each task is independent
-	// (its prompt was prepared in the pre-pass), so we can parallelize
-	// up to WEKNORA_QG_CONCURRENCY at the LLM provider. On a single Ollama
-	// instance, set OLLAMA_NUM_PARALLEL accordingly.
-	concurrency := envIntDefault("WEKNORA_QG_CONCURRENCY", 4)
+	// Run the LLM phase in bounded parallelism. Default = 1 to preserve
+	// the old sequential behaviour exactly: an upgrade should not change
+	// LLM call rates that operators may have tuned around (cloud rate
+	// limits, Ollama OLLAMA_NUM_PARALLEL, GPU memory). Operators that
+	// know their endpoint handles parallelism opt in via
+	// WEKNORA_QG_CONCURRENCY=4..16.
+	concurrency := envIntDefault("WEKNORA_QG_CONCURRENCY", 1)
 	if concurrency <= 0 {
 		concurrency = 1
 	}

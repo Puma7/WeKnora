@@ -189,16 +189,17 @@ func imageMultimodalTimeout() time.Duration {
 
 // llmCallTimeout caps a single LLM Chat call (Question Generation,
 // Summary). Independent of the asynq task budget: task budget = "all up
-// time", per-call budget = "single round-trip". Without this, a hung
-// model server pins the worker until the task timeout fires.
+// time", per-call budget = "single round-trip". 5 minutes accommodates
+// cold-start model loads on local Ollama plus a max-tokens generation;
+// tune via WEKNORA_LLM_TIMEOUT_MS for very slow hosts.
 func llmCallTimeout() time.Duration {
 	v := strings.TrimSpace(os.Getenv("WEKNORA_LLM_TIMEOUT_MS"))
 	if v == "" {
-		return 3 * time.Minute
+		return 5 * time.Minute
 	}
 	ms, err := strconv.Atoi(v)
 	if err != nil || ms <= 0 {
-		return 3 * time.Minute
+		return 5 * time.Minute
 	}
 	return time.Duration(ms) * time.Millisecond
 }

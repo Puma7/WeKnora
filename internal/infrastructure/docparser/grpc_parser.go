@@ -30,16 +30,16 @@ func getMaxMessageSize() int {
 // in seconds for typical files, but a malformed PDF or a parser engine
 // stuck on an external dependency can hang the connection indefinitely.
 // Without this cap, every parse attempt holds an asynq worker for the
-// full task timeout. 5 minutes is generous for any document up to the
-// configured MAX_FILE_SIZE_MB.
+// full task timeout. 15 minutes covers OCR-heavy 100MB+ PDFs on slow
+// CPU; tune via WEKNORA_DOCREADER_TIMEOUT_MS if needed.
 func docReaderReadTimeout() time.Duration {
 	v := strings.TrimSpace(os.Getenv("WEKNORA_DOCREADER_TIMEOUT_MS"))
 	if v == "" {
-		return 5 * time.Minute
+		return 15 * time.Minute
 	}
 	ms, err := strconv.Atoi(v)
 	if err != nil || ms <= 0 {
-		return 5 * time.Minute
+		return 15 * time.Minute
 	}
 	return time.Duration(ms) * time.Millisecond
 }
