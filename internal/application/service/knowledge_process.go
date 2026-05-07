@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
@@ -679,13 +680,26 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 	// Pre-allocate a rune buffer so each chunk is placed via copy() instead
 	// of rebuilding the entire string per iteration. Previous shape was
 	// O(N²) in chunk count; now O(total runes).
+	//
+	// The initial capacity is bounded by 2× total content rune count to
+	// guard against a corrupt chunk.EndAt (e.g. a botched migration) that
+	// would otherwise prompt a multi-gigabyte allocation here. Legitimate
+	// gaps from overlap/reordering fit comfortably inside that budget;
+	// the in-range branch below grows the buffer as needed for any chunk
+	// that actually references a higher offset.
 	maxEnd := 0
+	totalContentRunes := 0
 	for _, chunk := range sortedChunks {
 		if chunk.EndAt > maxEnd {
 			maxEnd = chunk.EndAt
 		}
+		totalContentRunes += utf8.RuneCountInString(chunk.Content)
 	}
-	buf := make([]rune, 0, maxEnd)
+	allocCap := maxEnd
+	if budget := totalContentRunes * 2; budget > 0 && allocCap > budget {
+		allocCap = budget
+	}
+	buf := make([]rune, 0, allocCap)
 	for _, chunk := range sortedChunks {
 		chunkRunes := []rune(chunk.Content)
 		if chunk.StartAt <= len(buf) {
