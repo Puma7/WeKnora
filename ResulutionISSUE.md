@@ -1044,3 +1044,100 @@ func generateNonce(length int) string {
 - **Critical findings now addressed (1–10, 41–45):** original 10 + WeChat ECB, OIDC nonce, TENANT_AES_KEY validation, init-migration drop, signer nonce/MD5.
 - **Total resolutions:** 45.
 - **Remaining for separate tickets:** as before, plus: WeKnoraCloud upstream MD5 (vendor coordination), iLink CDN ECB protocol (vendor coordination — only WeKnora-side mitigation possible).
+
+---
+
+## REVIEWER CROSS-CHECK (2026-05-07)
+
+The 2026-05-07 reviewer accepted all 9 critical fix proposals as "technisch stimmig" and flagged operational gaps. Each point is acknowledged and addressed below; one fix (#6) is **explicitly re-scoped** because the original framing oversold its security value.
+
+### One important reframe
+
+> **Fix 6 — Token storage:** the reviewer is correct that moving JWT/refresh from `localStorage` to `sessionStorage` is **only a blast-radius reduction**, not an XSS mitigation. JavaScript on the same origin can read either store identically. The interim fix reduces the *time window* during which a stolen token is replayable (tab close → token gone) and removes the token from disk-backed browser profile copies, but a successful XSS still steals the live token. The original Problem 6 text already used the word "interim" and explicitly named HttpOnly cookies as the target end-state, but the reviewer is right that this should be unambiguous, not implicit. **The only real fix is HttpOnly + SameSite=Strict cookies set by the backend; do not skip that ticket.**
+
+### Per-point acknowledgement and rollout/backout addenda
+
+#### 1. CORS allowlist — operational note
+- **Confirmed.** Empty `ALLOWED_ORIGINS` blocks all cross-origin browser requests (intentional fail-closed).
+- **Added rollout step:** log a startup warning if `ALLOWED_ORIGINS` is empty so misconfiguration is visible in operator dashboards.
+  ```go
+  if strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")) == "" { // NEW
+      logger.Warn(ctx, "ALLOWED_ORIGINS empty — all cross-origin browser requests will be rejected") // NEW
+  }                                                                                                // NEW
+  ```
+- **Backout:** revert the single `cors.New(...)` block; no schema migration, no data effect.
+
+#### 2. Slack secret hard-fail — config-doc requirement
+- **Confirmed.** Returning an error on empty secret is the right behaviour.
+- **Added rollout step:** doc page entry under `docs/wiki/集成扩展/slack.md` (or equivalent) calling out that integrations created before this change need `SLACK_SIGNING_SECRET` set, otherwise the webhook fails with `slack signing secret not configured`. Operator should be notified before deploy via release notes; otherwise integrations look "silent broken".
+- **Backout:** trivial; revert the one-line change in `VerifyCallback`.
+
+#### 3. Compose defaults — CI/dev profile coverage
+- **Confirmed.** `:?`-syntax (mandatory) is the cleanest fail-fast.
+- **Added rollout step:** all CI/dev workflows that bring up compose (`Makefile` targets, `docker-compose.dev.yml`, `scripts/dev.sh`) must export the now-mandatory variables. Recommend a `.env.ci` sample plus a `make ci-env-check` target that fails build if any required var is unset. Without this, CI breaks the moment the change merges.
+- **Backout:** revert the compose-file edits; restores the pre-change behaviour with weak defaults.
+
+#### 4. Langfuse `ENCRYPTION_KEY` mandatory — key-rotation note
+- **Confirmed.** Hard fail without a key.
+- **Added rollout step:** existing Langfuse instances that ran with the all-zeros default have encrypted observability data that becomes unreadable once a real key is set. Mitigation:
+  - Option A — accept loss of historical observability data: deploy with new key, old data becomes garbage but new traces flow.
+  - Option B — re-encrypt: stand up a one-shot migration script that decrypts with all-zeros and re-encrypts with the new key. Risk: any production data already encrypted with all-zeros has been effectively public — treat as a security incident on its own.
+- **Backout:** revert single line in compose file. **Note:** if Option B was used, the keys must NOT be reverted because old data is now only readable with the new key.
+
+#### 5. `curl | sh` → pin + SHA256 — hash sourcing
+- **Confirmed.** Pinning + checksum is the right shape.
+- **Added rollout step:** SHA-256 values must come from the upstream release artifact (`uv-installer.sh.sha256` published by Astral, or computed via `gh release download astral-sh/uv ... && sha256sum`). Recommend a `make refresh-installer-hashes` target so future bumps don't regress to copy/paste from a webpage. Document the source in a `hashes.md` next to the Dockerfile.
+- **Backout:** revert Dockerfile/script change. The previous `curl|sh` pattern is back, but the build is reproducible at the previous (unsafe) state.
+
+#### 6. Token storage — see "important reframe" above
+- **Re-scoped.** The sessionStorage move is **NOT a security fix for XSS** — it is a stolen-token-lifetime reduction. The XSS attack vector remains identical until HttpOnly cookies land.
+- **Added rollout step:** ship sessionStorage in the same deploy as a hardened CSP (`script-src 'self'; object-src 'none'; base-uri 'self'`). The CSP is the actual mitigation; sessionStorage is only a small reduction in blast radius.
+- **Critical follow-up ticket (cannot be skipped):** HttpOnly + SameSite=Strict cookies for both access and refresh tokens, with CSRF token in a sibling header. This is not optional — without it, the original critical finding is **not closed**.
+- **Backout:** trivial; revert auth.ts/request.ts changes. Existing sessions carry over because login is unchanged.
+
+#### 7. `asyncio.run()` → background loop — error semantics
+- **Confirmed.** Background loop + `run_coroutine_threadsafe` is correct.
+- **Added rollout step:** `fut.result(timeout=60)` raises three distinct exceptions that callers must handle:
+  - `concurrent.futures.TimeoutError` — scrape exceeded 60 s.
+  - `concurrent.futures.CancelledError` — loop torn down (e.g. on shutdown).
+  - any exception from inside `self.scrape(url)` — currently propagates raw.
+  Wrap the call site in a clear `try/except (TimeoutError, CancelledError) as e: return Document(content=f"Error: {e}")` so the gRPC handler doesn't crash on a hung URL.
+- **Backout:** revert `parse_into_text` and the helper. The old code panics under the same conditions but in different ways; backout is functionally equivalent to the pre-fix behaviour.
+
+#### 8. Mutable defaults `[]` → `None` — risk-free
+- **Confirmed.** Pure Python idiom fix.
+- **Added rollout step:** none beyond a unit test for the fixed function (verify cross-call isolation).
+- **Backout:** trivial revert; no data implication.
+
+#### 9. Compose resource limits — env-specific sizing
+- **Confirmed.** Limits are necessary but **not** universally identical.
+- **Refined rollout step:** the values listed in Problem 9 are starting points for a **dev/staging** workload. Production sizing must be derived from observed load (memory peaks during ingestion, CPU during embedding bursts, retries during reranker timeout storms). Recommend a `docker-compose.prod.yml` overlay with prod-tuned limits, leaving `docker-compose.yml` at conservative dev defaults.
+- **Specific risks if sized wrong:**
+  - **Too low:** containers OOM-restart under normal load → user-visible outage.
+  - **Too high:** no protection against runaway processes; reverts to original problem.
+- **Backout:** remove the `mem_limit`/`cpus`/`deploy.resources` blocks. Pre-change behaviour returns (no enforcement).
+
+### Generic rollout/backout discipline (applies to fixes 10–45)
+
+The reviewer's request — "pro Fix Rollout/Backout-Hinweise" — generalises beyond the 9 critical points. For all remaining resolutions:
+
+1. **Rollout gate:** every fix lands in its own commit on a feature branch, with a unit/integration test if the change touches behaviour. CI must include `golangci-lint`, `go test ./...`, frontend `vue-tsc --build`, and (where applicable) a compose smoke-up against the dev profile.
+2. **Backout gate:** every commit must be revertible in one `git revert` step. Avoid combining unrelated fixes. Compose changes that mandate new env vars must be merged together with the doc PR that introduces them.
+3. **Production rollout order (recommended):**
+   - **First:** all #1-#9 critical fixes (this section), each behind feature flags where possible, with the matching ops doc updates merged simultaneously.
+   - **Then:** #11-#20 high fixes — these are mostly internal correctness improvements with low blast radius.
+   - **Finally:** #21-#45 medium / cleanup — can be batched.
+4. **Observation window:** after each critical-fix deploy, monitor 24 h for: 401/403 spike (CORS / Slack signature regressions), pod restarts (resource-limit too tight), SSO failure rate (OIDC nonce regressions, when #42 lands).
+
+### Status of fixes 10–45
+
+The reviewer did not enumerate items 10–45 individually but signalled that the same operational discipline applies. The validity of each fix vs. the underlying source has already been cross-checked against `ISSUE.md` Section 9 (which verified the reviewer's findings list line-by-line). No further changes to the fix proposals 10–45 are warranted on the basis of this review; the rollout/backout discipline above applies uniformly.
+
+### Net effect on this document
+
+- **No fix proposal is retracted.**
+- Fix 6 is **re-scoped** from "interim security fix" to "blast-radius reduction; XSS mitigation deferred to HttpOnly-cookie ticket".
+- Operational rollout/backout notes added for all 9 critical fixes.
+- Generic discipline added for fixes 10–45.
+
+The reviewer's overall assessment ("technisch stimmig … priorisiert Security korrekt") holds; the additions are operational guard-rails, not technical corrections.
