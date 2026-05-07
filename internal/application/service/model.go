@@ -388,6 +388,21 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
 	return reranker, nil
 }
 
+// GetTenantDefaultRerankModelID returns the tenant's default rerank model ID.
+// Returns "" when no default is set; an error indicates a DB failure (callers
+// generally treat that as "no default" too, since the consumer flows degrade
+// gracefully without a reranker).
+func (s *modelService) GetTenantDefaultRerankModelID(ctx context.Context, tenantID uint) (string, error) {
+	model, err := s.repo.GetDefaultByType(ctx, tenantID, types.ModelTypeRerank)
+	if err != nil {
+		return "", err
+	}
+	if model == nil {
+		return "", nil
+	}
+	return model.ID, nil
+}
+
 // GetChatModel retrieves and initializes a chat model instance
 // Takes a model ID and returns a Chat interface implementation
 func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.Chat, error) {

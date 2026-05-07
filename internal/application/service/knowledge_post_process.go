@@ -64,6 +64,16 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		return nil
 	}
 
+	// Heartbeat updated_at while we're still on parse_status='processing'.
+	// processChunks ran the heartbeat during indexing, then exited; this
+	// asynq task picks it back up so the watchdog stays accurate during
+	// any work this handler does before it flips status to 'completed'
+	// (e.g. listing chunks for a 50k-chunk document is non-trivial).
+	if knowledge.ParseStatus == types.ParseStatusProcessing {
+		stopHeartbeat := startKnowledgeHeartbeat(ctx, s.knowledgeRepo, payload.KnowledgeID)
+		defer stopHeartbeat()
+	}
+
 	kb, err := s.kbService.GetKnowledgeBaseByIDOnly(ctx, payload.KnowledgeBaseID)
 	if err != nil || kb == nil {
 		return fmt.Errorf("get knowledge base %s: %w", payload.KnowledgeBaseID, err)
@@ -150,8 +160,11 @@ func (s *KnowledgePostProcessService) enqueueSummaryGenerationTask(ctx context.C
 		return
 	}
 
+	// 30 min matches Asynq's previous implicit default — slow self-hosted
+	// LLMs and rate-limited APIs routinely sit between 15 and 30 min, so a
+	// 15-minute cap would surface as a regression for those tenants.
 	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes,
-		summaryOpts(asynq.TaskID(SummaryTaskID(payload.KnowledgeID)))...)
+		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		if IsTaskIDConflict(err) {
 			logger.Infof(ctx, "[KnowledgePostProcess] Summary task already queued for %s, skipping", payload.KnowledgeID)
@@ -194,8 +207,12 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationIfEnabled(ctx con
 		return
 	}
 
+	// 30 min: Q-Gen is N serial LLM calls (one per question slot up to
+	// QuestionCount). On slow LLMs that easily exceeds 15 min for a single
+	// knowledge with QuestionCount=10. Match Asynq's previous default to
+	// avoid silently regressing those tenants.
 	task := asynq.NewTask(types.TypeQuestionGeneration, payloadBytes,
-		qgOpts(asynq.TaskID(QGTaskID(payload.KnowledgeID)))...)
+		asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		if IsTaskIDConflict(err) {
 			logger.Infof(ctx, "[KnowledgePostProcess] QG task already queued for %s, skipping", payload.KnowledgeID)

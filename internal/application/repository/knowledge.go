@@ -285,6 +285,32 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
 	return err
 }
 
+// FindStuckProcessing returns knowledge rows still in parse_status = 'processing'
+// whose updated_at is older than now-threshold. Caller-supplied limit caps a
+// mass-failure scenario from flooding the watchdog log. Time arithmetic is
+// done in Go (not via NOW() - INTERVAL) to avoid SQLite vs Postgres dialect
+// differences — both share the lite/full schema.
+func (r *knowledgeRepository) FindStuckProcessing(
+	ctx context.Context,
+	threshold time.Duration,
+	limit int,
+) ([]*types.Knowledge, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	cutoff := time.Now().Add(-threshold)
+	var rows []*types.Knowledge
+	err := r.db.WithContext(ctx).
+		Where("parse_status = ? AND updated_at < ?", "processing", cutoff).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base
 func (r *knowledgeRepository) CountKnowledgeByKnowledgeBaseID(
 	ctx context.Context,
