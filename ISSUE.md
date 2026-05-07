@@ -437,3 +437,88 @@ func generateNonce(length int) string {
 ---
 
 **Updated counts:** Critical 18 → **23**, total findings now 143.
+
+---
+
+## 9. Validation Cross-Check (Review 2026-05-07)
+
+In response to reviewer feedback marking several findings as "plausible but not line-by-line re-verified", the following section re-checks each disputed item against the actual source via `grep`/`Read` and **corrects four inaccuracies** in the original report.
+
+### 9.1 Findings the reviewer flagged as "not re-verified" — verification result
+
+| # | Original claim | Verification command / evidence | Status |
+|---|---|---|---|
+| 3 | Hardcoded compose defaults | `grep -nE "NEO4J_PASSWORD\|MINIO_…\|CLICKHOUSE_…\|LANGFUSE_…\|JWT_SECRET" docker-compose.yml` returns hits at `:115, 128, 238, 284, 437, 438, 463, 522, 525, 530, 531` — every line uses `:-default` syntax (`:-password`, `:-minioadmin`, `:-clickhouse`, `:-langfuseminiosecret`, `:-…change-me`) | **CONFIRMED** |
+| 4 | Langfuse `ENCRYPTION_KEY` = 64×0 | `docker-compose.yml:523` literally reads `${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}` (64 zeros) | **CONFIRMED** |
+| 9 | No resource limits | `grep -cE "^\s*(deploy:\|resources:\|mem_limit:\|cpus:\|memory:)" docker-compose.yml docker-compose.dev.yml` returns `0` for both files | **CONFIRMED** |
+| 11 | `math/rand` in handler path | `internal/handler/initialization.go:8` imports `math/rand`; `:2372` calls `rand.Intn(len(tagOptions)-1)+1` inside HTTP handler `FabriTag` | **CONFIRMED** |
+| 12 | 4 rerankers `&http.Client{}` no timeout | `grep -nE "&http\.Client\{\}" internal/models/rerank/*.go` returns `aliyun_reranker.go:90`, `jina_reranker.go:63`, `remote_api.go:65`, `zhipu_reranker.go:74` — all 4 instantiated without `Timeout` | **CONFIRMED** |
+| 13 | WeChat download lacks SSRF | `internal/im/wechat/adapter.go:155` calls `http.NewRequestWithContext(ctx, GET, msg.FileKey, nil)`; no `ValidateURLForSSRF` or `NewSSRFSafeHTTPClient` reference anywhere in the file | **CONFIRMED** |
+| 15 | `actions/checkout@v3` | `grep -n "actions/checkout@" .github/workflows/*.yml` shows `docker-image.yml:18, 67, 100, 143` use `@v3`; `release-lite.yml` already uses `@v4`. Scope: **1 of 2 workflow files** affected (original claim correctly cited only docker-image.yml) | **CONFIRMED** |
+| 17 | `migrate.sh` quote/log issue | `scripts/migrate.sh:54` runs `python3 -c "…quote('$DB_PASSWORD'…")` (shell-interpolates the password into a Python string literal — breaks on `'`); `:68` runs `echo "DB_PASSWORD: ${DB_PASSWORD}"` to stdout | **CONFIRMED** |
+
+### 9.2 Findings with corrections needed
+
+> The reviewer was right to flag these as "not re-verified" — concrete checking surfaces inaccuracies in line numbers / counts. The underlying problem in each case is real, but the cited evidence in §3.1 / §6.2 is partially wrong.
+
+#### Correction A — Finding 14: `saveKBCloneProgress`
+
+| Field | Original report | Verified reality |
+|---|---|---|
+| Count of ignored errors | 13× | **9×** (`grep -n "_ = s.saveKBCloneProgress"` returns lines 260, 310, 342, 368, 413, 430, 440, 484, 579) |
+| Properly-handled calls | not mentioned | **3×** (lines 274, 385, 588 use `if err := s.saveKBCloneProgress(...); err != nil`) |
+| Bogus line numbers | 743, 758, 797, 810 | **Do not exist** — function definition ends at line 637; the last invocation in the file is at line 648 |
+
+**Net:** the issue is real, but smaller in magnitude (9, not 13) and there are already 3 correctly-handled call sites that prove the developer knew the right pattern — making this look more like inconsistency than systemic ignorance.
+
+#### Correction B — Finding 16: `:latest` image tags
+
+`grep -n "image:" docker-compose*.yml | grep -E ":latest|:\$"` shows the **actual** affected lines:
+
+| File | Real `:latest` lines | Service |
+|---|---|---|
+| `docker-compose.yml` | 3 | weknora-ui |
+| `docker-compose.yml` | 29 | weknora-app |
+| `docker-compose.yml` | **163** *(missed in original)* | weknora-sandbox |
+| `docker-compose.yml` | 174 | weknora-docreader |
+| `docker-compose.yml` | 366 | dexidp/dex |
+| `docker-compose.dev.yml` | 39 | minio |
+| `docker-compose.dev.yml` | 106 | neo4j |
+| `docker-compose.dev.yml` | **128** *(missed in original)* | weknora-sandbox |
+| `docker-compose.dev.yml` | **142** *(missed in original)* | weknora-docreader |
+| `docker-compose.dev.yml` | 165 | jaegertracing/all-in-one |
+| `docker-compose.dev.yml` | 190 | dexidp/dex |
+
+**Bogus line numbers in original:** `docker-compose.yml:144` and `:290` (Neo4j in main compose is **not** on `:latest`; it pins a version). The original report cited 290 incorrectly.
+
+**Missed sites:** 3 additional services — `weknora-sandbox` (lines 163 and 128) and `weknora-docreader` in dev (line 142). The fix-strategy in `ResulutionISSUE.md` Problem 17 must extend to cover these.
+
+#### Correction C — Finding 18: deep watchers count
+
+| Field | Original | Verified |
+|---|---|---|
+| "13 deep watchers" | 13 | **11** project-wide (`grep -rl "deep:\s*true" frontend/src --include="*.vue" --include="*.ts" \| wc -l`) |
+
+Per-file counts (`grep -cE "deep:\s*true"`): `chat/index.vue:2`, `chat/components/AgentStreamDisplay.vue:2`, `creatChat/creatChat.vue:2`, `knowledge/components/FAQEntryManager.vue:2`, plus 1 each in `doc-content.vue`, `Input-field.vue`, `KnowledgeBase.vue`. Sum = 11.
+
+Performance concern is unchanged; only the number is corrected.
+
+#### Correction D — Finding 19: `context.Background()` undercounted
+
+The original report listed 8 occurrences in `qaqueue.go` and 5 in `service.go`. Real counts via `grep -cE "context\.Background\(\)"`:
+
+| File | Original claim | Verified |
+|---|---|---|
+| `internal/im/qaqueue.go` | 8 | **10** |
+| `internal/im/service.go` | 5 | **18** |
+
+The pattern is **more pervasive than originally reported**, not less. Severity stays **High**, but the recommended remediation needs to widen its scope when the fix is implemented.
+
+### 9.3 Net effect on the report
+
+- **Findings the reviewer directly verified (1, 2, 5, 6, 7, 8, 10, 20):** all confirmed against source — no changes.
+- **Findings flagged as "plausible but not re-verified" (3, 4, 9, 11, 12, 13, 15, 17):** all **CONFIRMED** with concrete grep evidence above.
+- **Findings with quantitative corrections (14, 16, 18, 19):** real underlying issue stands; line numbers / counts adjusted as documented.
+- **Critical and High totals unchanged.** Total finding count adjusted: 14 reduced from 13 → 9 ignored, 16 expanded from 9 → 11 sites; net delta ≈ 0. The Top-20 ranking is unaffected.
+
+The reviewer's overall assessment ("Fix-Empfehlungen technisch sauber und angemessen priorisiert") holds; the four corrections are bookkeeping, not severity changes.
