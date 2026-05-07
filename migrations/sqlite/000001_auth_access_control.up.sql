@@ -15,16 +15,22 @@ ALTER TABLE users ADD COLUMN invited_by_user_id VARCHAR(36);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_invited_by ON users(invited_by_user_id);
 
--- Promote the earliest user of each tenant to owner so existing installs keep
--- having an effective tenant owner after the role column is introduced.
+-- Promote the earliest active non-deleted user of each tenant to owner so
+-- existing installs keep having an effective tenant owner. A soft-deleted or
+-- disabled first user is skipped to avoid handing owner role to an account
+-- that can no longer log in.
 UPDATE users
 SET role = 'owner'
 WHERE role = 'member'
   AND tenant_id IS NOT NULL
+  AND deleted_at IS NULL
+  AND is_active = 1
   AND id = (
     SELECT u2.id
     FROM users u2
     WHERE u2.tenant_id = users.tenant_id
+      AND u2.deleted_at IS NULL
+      AND u2.is_active = 1
     ORDER BY u2.created_at ASC, u2.id ASC
     LIMIT 1
   );

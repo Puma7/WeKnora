@@ -21,13 +21,17 @@ COMMENT ON COLUMN users.permissions IS 'Optional JSON map of feature flags overr
 COMMENT ON COLUMN users.invited_by_user_id IS 'User ID of the admin who invited this account (null for self-registered or OIDC users)';
 
 -- The first existing user in every tenant becomes the implicit owner.
--- We use the earliest created_at per tenant_id so multi-user tenants keep working.
+-- We pick the earliest ACTIVE non-deleted user per tenant so a soft-deleted or
+-- disabled first user doesn't end up holding owner role with no functional
+-- access. Tenants without any active user simply don't get an owner backfilled.
 UPDATE users u
 SET role = 'owner'
 WHERE u.id IN (
     SELECT DISTINCT ON (tenant_id) id
     FROM users
     WHERE tenant_id IS NOT NULL
+      AND deleted_at IS NULL
+      AND is_active = TRUE
     ORDER BY tenant_id, created_at ASC, id ASC
 )
 AND u.role = 'member';

@@ -154,7 +154,7 @@
                     <t-icon class="menu-icon" name="setting" />
                     <span>{{ $t('knowledgeBase.settings') }}</span>
                   </div>
-                  <div class="popup-menu-item" @click.stop="openPermissionsById(kb.id)">
+                  <div v-if="canShowKBPermissionsMenu" class="popup-menu-item" @click.stop="openPermissionsById(kb.id)">
                     <t-icon class="menu-icon" name="usergroup" />
                     <span>{{ $t('kbPermissions.menuItem') }}</span>
                   </div>
@@ -342,7 +342,7 @@
                   <t-icon class="menu-icon" name="setting" />
                   <span>{{ $t('knowledgeBase.settings') }}</span>
                 </div>
-                <div class="popup-menu-item" @click.stop="openPermissions(kb)">
+                <div v-if="canShowKBPermissionsMenu" class="popup-menu-item" @click.stop="openPermissions(kb)">
                   <t-icon class="menu-icon" name="usergroup" />
                   <span>{{ $t('kbPermissions.menuItem') }}</span>
                 </div>
@@ -928,6 +928,14 @@ const handleSettingsById = (id: string) => {
 // KB-level user permissions dialog
 const permissionsDialogVisible = ref(false)
 const permissionsKbId = ref('')
+// NEU: hide the "user permissions" menu entry for non-admin tenant members so
+// the popup looks identical to what they had before this update. Admins/owners
+// (and KB owners — handled implicitly because they're often also tenant admins)
+// keep seeing it. Backend still enforces; this is purely UI-quietude.
+const canShowKBPermissionsMenu = computed(() => {
+  const role = (authStore.user as any)?.role
+  return role === 'owner' || role === 'admin'
+})
 const openPermissions = (kb: KB) => {
   kb.showMore = false
   permissionsKbId.value = kb.id

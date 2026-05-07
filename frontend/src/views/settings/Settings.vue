@@ -184,11 +184,19 @@ import ParserEngineSettings from './ParserEngineSettings.vue'
 import StorageEngineSettings from './StorageEngineSettings.vue'
 import WeKnoraCloudSettings from './WeKnoraCloudSettings.vue'
 import UserManagement from './UserManagement.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const uiStore = useUIStore()
 const { t } = useI18n()
+// NEU: gate visibility of admin-only settings entries so non-admin tenant
+// members keep seeing the same sidebar they had before this update.
+const authStore = useAuthStore()
+const canManageUsers = computed(() => {
+  const role = (authStore.user as any)?.role
+  return role === 'owner' || role === 'admin'
+})
 
 const currentSection = ref<string>('general')
 const currentSubSection = ref<string>('')
@@ -207,7 +215,11 @@ const navItems = computed(() => [
   { key: 'mcp', icon: 'tools', label: t('settings.mcpService') },
   { key: 'system', icon: 'info-circle', label: t('settings.systemSettings') },
   { key: 'tenant', icon: 'user-circle', label: t('settings.tenantInfo') },
-  { key: 'users', icon: 'usergroup', label: t('settings.userManagement') },
+  // GEÄNDERT: only render the user-management entry for tenant admins/owners.
+  // Non-admin members keep seeing the exact same sidebar they had before.
+  ...(canManageUsers.value
+    ? [{ key: 'users', icon: 'usergroup', label: t('settings.userManagement') }]
+    : []),
   { key: 'api', icon: 'secured', label: t('settings.apiInfo') }
 ])
 

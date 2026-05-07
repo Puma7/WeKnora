@@ -195,12 +195,14 @@ func (s *kbPermissionService) ListByKB(
 //  2. Tenant owner/admin -> admin
 //  3. KB owner_id == user-> admin
 //  4. Has explicit grant -> grant level
-//  5. KB has ZERO grants -> viewer (preserves legacy tenant-wide visibility)
+//  5. KB has ZERO grants -> admin (preserves legacy tenant-wide full-access workflow;
+//                          regular members keep being able to view/edit/delete KBs that
+//                          haven't been explicitly locked down — opt-in restriction)
 //  6. KB has grants but none for this user -> denied
 //
-// Rule 5+6 together mean: a KB stays tenant-wide-visible until someone adds the
-// first explicit grant; once any grant exists, the KB becomes restricted to the
-// granted users (plus tenant admins/owners and the KB owner).
+// Note: this resolution is for general KB access. Operations that could
+// escalate privilege (Grant/UpdatePermission/Revoke) use requireKBAdmin's
+// strict path which deliberately skips rule 5.
 func (s *kbPermissionService) ResolvePermission(
 	ctx context.Context, user *types.User, kbID string,
 ) (types.KBPermission, bool, error) {
@@ -262,8 +264,12 @@ func (s *kbPermissionService) ResolvePermissionWithKB(
 		// KB has grants but not for this user -> restricted, no access.
 		return "", false, nil
 	}
-	// No grants exist on this KB anywhere -> tenant-wide viewer access (legacy compat).
-	return types.KBPermissionViewer, true, nil
+	// GEÄNDERT: legacy tenant-wide ADMIN access (was viewer). Old behavior was
+	// that any tenant member could read/edit/delete any KB in their tenant via
+	// validateAndGetKnowledgeBase returning OrgRoleAdmin. We preserve that
+	// exactly until an admin opts into restriction by adding the first grant.
+	// Privilege escalation (granting) is independently gated by requireKBAdmin.
+	return types.KBPermissionAdmin, true, nil
 }
 
 // FilterAccessibleSameTenant filters a list of KBs to those the user can view.
@@ -340,13 +346,35 @@ func (s *kbPermissionService) FilterAccessibleSameTenant(
 }
 
 // requireKBAdmin asserts the actor can manage the KB's permissions.
+//
+// GEÄNDERT: deliberately strict. Does NOT use ResolvePermission's rule-5
+// fallback (no-grants-anywhere -> admin) because that would let any tenant
+// member grant access on a fresh KB and effectively self-promote. Authority
+// here must come from one of: tenant owner/admin role, KB ownership, or an
+// explicit admin grant.
 func (s *kbPermissionService) requireKBAdmin(ctx context.Context, actor *types.User, kbID string) error {
-	perm, ok, err := s.ResolvePermission(ctx, actor, kbID)
-	if err != nil {
-		return fmt.Errorf("failed to resolve permission: %w", err)
+	if actor == nil {
+		return errors.New("actor required")
 	}
-	if !ok || !perm.HasAtLeast(types.KBPermissionAdmin) {
+	kb, err := s.kbRepo.GetKnowledgeBaseByID(ctx, kbID)
+	if err != nil {
+		return fmt.Errorf("failed to load knowledge base: %w", err)
+	}
+	if kb == nil || kb.TenantID != actor.TenantID {
 		return errors.New("permission denied")
 	}
-	return nil
+	if actor.Role == types.UserRoleOwner || actor.Role == types.UserRoleAdmin {
+		return nil
+	}
+	if kb.OwnerID != "" && kb.OwnerID == actor.ID {
+		return nil
+	}
+	grant, gerr := s.repo.GetByKBAndUser(ctx, kbID, actor.ID)
+	if gerr == nil && grant.Permission == types.KBPermissionAdmin {
+		return nil
+	}
+	if gerr != nil && !errors.Is(gerr, apprepo.ErrKBPermissionNotFound) {
+		return gerr
+	}
+	return errors.New("permission denied")
 }
