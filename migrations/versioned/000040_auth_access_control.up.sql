@@ -36,6 +36,31 @@ WHERE u.id IN (
 )
 AND u.role = 'member';
 
+-- Surface tenants left without an owner so the operator can decide how to
+-- recover them (typically: re-activate a user and run
+--   UPDATE users SET role = 'owner' WHERE id = '<user-id>';
+-- or hard-delete the empty tenant).
+DO $$
+DECLARE
+    orphan_count INT;
+    orphan_tenant_ids TEXT;
+BEGIN
+    SELECT COUNT(DISTINCT t.id), STRING_AGG(DISTINCT t.id::TEXT, ', ')
+    INTO orphan_count, orphan_tenant_ids
+    FROM tenants t
+    LEFT JOIN users u
+        ON u.tenant_id = t.id
+        AND u.role = 'owner'
+        AND u.deleted_at IS NULL
+        AND u.is_active = TRUE
+    WHERE t.deleted_at IS NULL AND u.id IS NULL;
+
+    IF orphan_count > 0 THEN
+        RAISE NOTICE '[Migration 000040] % tenant(s) have no active owner after backfill: %. Manual review recommended.',
+            orphan_count, orphan_tenant_ids;
+    END IF;
+END $$;
+
 -- 2. Track KB ownership at the user level (not just tenant level).
 -- We deliberately do NOT backfill owner_id for legacy KBs: leaving it NULL keeps
 -- tenant-wide visibility working for those rows under the resolution rule

@@ -198,7 +198,8 @@ import { useAuthStore } from '@/stores/auth'
 const { t } = useI18n()
 const auth = useAuthStore()
 const currentUserId = computed(() => auth.user?.id || '')
-const currentUserRole = computed<UserRole>(() => (auth.user as any)?.role || 'member')
+// GEÄNDERT: typed role access (UserInfo.role is now a UserRole literal).
+const currentUserRole = computed<UserRole>(() => (auth.user?.role as UserRole | undefined) || 'member')
 const ROLE_LEVELS: Record<UserRole, number> = { owner: 4, admin: 3, member: 2, viewer: 1 }
 
 const tab = ref<'users' | 'invitations'>('users')

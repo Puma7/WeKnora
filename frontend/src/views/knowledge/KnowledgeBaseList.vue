@@ -154,7 +154,7 @@
                     <t-icon class="menu-icon" name="setting" />
                     <span>{{ $t('knowledgeBase.settings') }}</span>
                   </div>
-                  <div v-if="canShowKBPermissionsMenu" class="popup-menu-item" @click.stop="openPermissionsById(kb.id)">
+                  <div v-if="canManageKBPermissions(kb)" class="popup-menu-item" @click.stop="openPermissionsById(kb.id)">
                     <t-icon class="menu-icon" name="usergroup" />
                     <span>{{ $t('kbPermissions.menuItem') }}</span>
                   </div>
@@ -342,7 +342,7 @@
                   <t-icon class="menu-icon" name="setting" />
                   <span>{{ $t('knowledgeBase.settings') }}</span>
                 </div>
-                <div v-if="canShowKBPermissionsMenu" class="popup-menu-item" @click.stop="openPermissions(kb)">
+                <div v-if="canManageKBPermissions(kb)" class="popup-menu-item" @click.stop="openPermissions(kb)">
                   <t-icon class="menu-icon" name="usergroup" />
                   <span>{{ $t('kbPermissions.menuItem') }}</span>
                 </div>
@@ -687,15 +687,19 @@ const { t } = useI18n()
 // 左侧空间选择：我的 / 空间 ID（已去掉「全部」）
 const spaceSelection = ref<'all' | 'mine' | 'shared' | string>('mine')
 
-interface KB { 
-  id: string; 
-  name: string; 
-  description?: string; 
+interface KB {
+  id: string;
+  name: string;
+  description?: string;
   updated_at?: string;
   embedding_model_id?: string;
   summary_model_id?: string;
   type?: 'document' | 'faq';
   showMore?: boolean;
+  // NEU: backend stamps owner_id on creation (null for legacy rows). Used to
+  // decide whether the current user may see the per-KB permissions UI even
+  // without tenant-wide admin role.
+  owner_id?: string;
   vlm_config?: { enabled?: boolean; model_id?: string };
   extract_config?: { enabled?: boolean };
   storage_provider_config?: { provider?: string };
@@ -928,14 +932,18 @@ const handleSettingsById = (id: string) => {
 // KB-level user permissions dialog
 const permissionsDialogVisible = ref(false)
 const permissionsKbId = ref('')
-// NEU: hide the "user permissions" menu entry for non-admin tenant members so
-// the popup looks identical to what they had before this update. Admins/owners
-// (and KB owners — handled implicitly because they're often also tenant admins)
-// keep seeing it. Backend still enforces; this is purely UI-quietude.
-const canShowKBPermissionsMenu = computed(() => {
-  const role = (authStore.user as any)?.role
-  return role === 'owner' || role === 'admin'
-})
+// GEÄNDERT: per-KB visibility check. The previous version only allowed
+// tenant-wide owner/admin and broke the contract for non-admin members who
+// are the KB owner — backend's requireKBAdmin allows them, frontend was
+// hiding the UI. Now we mirror the backend rule for the two cases the
+// frontend can decide locally; the rare "member with explicit admin grant"
+// case still falls back to the backend, which surfaces an error if abused.
+function canManageKBPermissions(kb: KB): boolean {
+  const role = authStore.user?.role
+  if (role === 'owner' || role === 'admin') return true
+  const myId = authStore.user?.id
+  return !!myId && !!kb.owner_id && kb.owner_id === myId
+}
 const openPermissions = (kb: KB) => {
   kb.showMore = false
   permissionsKbId.value = kb.id

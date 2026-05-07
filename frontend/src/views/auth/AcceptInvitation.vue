@@ -143,8 +143,8 @@ async function onSubmit() {
         avatar: loginResp.user.avatar,
         tenant_id: String(loginResp.tenant.id),
         can_access_all_tenants: !!loginResp.user.can_access_all_tenants,
-        role: (loginResp.user as any).role,
-        permissions: (loginResp.user as any).permissions,
+        role: loginResp.user.role,
+        permissions: loginResp.user.permissions,
         created_at: loginResp.user.created_at,
         updated_at: loginResp.user.updated_at,
       })

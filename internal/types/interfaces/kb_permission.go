@@ -16,13 +16,27 @@ type KBPermissionService interface {
 	Revoke(ctx context.Context, actor *types.User, grantID string) error
 	// ListByKB returns all active grants for a knowledge base.
 	ListByKB(ctx context.Context, actor *types.User, kbID string) ([]types.KBUserPermissionResponse, error)
-	// ResolvePermission returns the highest permission a user has on a KB,
-	// considering: ownership, direct grants, and tenant membership.
-	// Returns ("", false) when the user has no access at all.
+	// ResolvePermission returns the EFFECTIVE access level a user has on a KB,
+	// including the legacy "no grants anywhere -> tenant-wide admin" fallback.
+	//
+	// SAFETY CONTRACT (read carefully before reusing this method):
+	//   This is the "view/edit/delete" gate. It deliberately returns Admin for
+	//   grant-less KBs to preserve pre-feature workflows. DO NOT use it to
+	//   authorize privilege-escalating operations (granting access, changing
+	//   permissions, transferring ownership) — a non-admin tenant member would
+	//   pass it on a fresh KB and could grant arbitrary access. For those
+	//   operations use ResolveExplicitPermission or the strict requireKBAdmin
+	//   path inside the service.
 	ResolvePermission(ctx context.Context, user *types.User, kbID string) (types.KBPermission, bool, error)
-	// NEU: ResolvePermissionWithKB skips the KB lookup when the caller already
-	// has the row loaded — avoids an extra DB roundtrip on hot paths.
+	// ResolvePermissionWithKB skips the KB lookup when the caller already has
+	// the row loaded — avoids an extra DB roundtrip on hot paths.
+	// Same SAFETY CONTRACT as ResolvePermission.
 	ResolvePermissionWithKB(ctx context.Context, user *types.User, kb *types.KnowledgeBase) (types.KBPermission, bool, error)
+	// NEU: ResolveExplicitPermission is the strict variant that does NOT apply
+	// the legacy "no grants -> admin" fallback. Returns the user's permission
+	// only when it stems from tenant role, KB ownership, or an explicit grant.
+	// Use this for any check that could authorize a privilege-escalating action.
+	ResolveExplicitPermission(ctx context.Context, user *types.User, kb *types.KnowledgeBase) (types.KBPermission, bool, error)
 	// FilterAccessibleSameTenant returns the subset of input KBs the user is
 	// allowed to view under the same-tenant rules. Cross-tenant KBs are returned
 	// unchanged so the caller's existing org-share logic stays authoritative.

@@ -215,8 +215,8 @@ async function hydrateSessionFromToken(authStore: ReturnType<typeof useAuthStore
       avatar: user.avatar,
       tenant_id: String(user.tenant_id || response.data?.tenant?.id || ''),
       can_access_all_tenants: user.can_access_all_tenants || false,
-      role: (user as any).role,
-      permissions: (user as any).permissions,
+      role: user.role,
+      permissions: user.permissions,
       created_at: user.created_at || new Date().toISOString(),
       updated_at: user.updated_at || new Date().toISOString(),
     })

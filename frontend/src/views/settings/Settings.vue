@@ -192,9 +192,10 @@ const uiStore = useUIStore()
 const { t } = useI18n()
 // NEU: gate visibility of admin-only settings entries so non-admin tenant
 // members keep seeing the same sidebar they had before this update.
+// GEÄNDERT: typed access via UserInfo.role (no more `as any`).
 const authStore = useAuthStore()
 const canManageUsers = computed(() => {
-  const role = (authStore.user as any)?.role
+  const role = authStore.user?.role
   return role === 'owner' || role === 'admin'
 })
 

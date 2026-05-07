@@ -3,6 +3,22 @@ import i18n from '@/i18n'
 
 const t = (key: string) => i18n.global.t(key)
 
+/**
+ * GEÄNDERT: role typed as a literal union and exported so call sites get
+ * compile-time checking instead of hand-rolled `as any` casts.
+ */
+export type UserRole = 'owner' | 'admin' | 'member' | 'viewer'
+
+/** Effective feature flags returned by the backend (with role defaults applied). */
+export interface UserPermissionFlags {
+  can_chat?: boolean
+  can_search?: boolean
+  can_create_kb?: boolean
+  can_invite_users?: boolean
+  can_manage_users?: boolean
+  can_manage_kbs?: boolean
+}
+
 // 用户登录接口
 export interface LoginRequest {
   email: string
@@ -20,6 +36,9 @@ export interface LoginResponse {
     tenant_id: number
     can_access_all_tenants?: boolean
     is_active: boolean
+    /** GEÄNDERT: typed alongside UserInfo so call sites no longer need `as any`. */
+    role?: UserRole
+    permissions?: UserPermissionFlags
     created_at: string
     updated_at: string
   }
@@ -87,20 +106,10 @@ export interface UserInfo {
   avatar?: string
   tenant_id: string
   can_access_all_tenants?: boolean
-  /** Global role inside the tenant (owner/admin/member/viewer); may be missing on legacy responses. */
-  role?: string
-  /**
-   * Effective feature permissions returned by the backend (with role defaults applied).
-   * Boolean flags only — overrides are not separable here.
-   */
-  permissions?: {
-    can_chat?: boolean
-    can_search?: boolean
-    can_create_kb?: boolean
-    can_invite_users?: boolean
-    can_manage_users?: boolean
-    can_manage_kbs?: boolean
-  }
+  /** Global role inside the tenant; missing on legacy responses pre-update. */
+  role?: UserRole
+  /** Effective feature flags with role defaults applied (see UserPermissionFlags). */
+  permissions?: UserPermissionFlags
   created_at: string
   updated_at: string
 }

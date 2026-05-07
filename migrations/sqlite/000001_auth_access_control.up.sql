@@ -19,6 +19,18 @@ CREATE INDEX IF NOT EXISTS idx_users_invited_by ON users(invited_by_user_id);
 -- existing installs keep having an effective tenant owner. A soft-deleted or
 -- disabled first user is skipped to avoid handing owner role to an account
 -- that can no longer log in.
+--
+-- Recovery hint for operators: tenants that have no active user receive no
+-- owner. Inspect them with:
+--   SELECT t.id FROM tenants t
+--    WHERE t.deleted_at IS NULL
+--      AND NOT EXISTS (
+--        SELECT 1 FROM users u
+--         WHERE u.tenant_id = t.id AND u.role = 'owner'
+--           AND u.deleted_at IS NULL AND u.is_active = 1
+--      );
+-- and either re-activate a user (UPDATE users SET is_active=1, role='owner' ...)
+-- or remove the orphan tenant.
 UPDATE users
 SET role = 'owner'
 WHERE role = 'member'

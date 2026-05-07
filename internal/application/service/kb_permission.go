@@ -345,36 +345,63 @@ func (s *kbPermissionService) FilterAccessibleSameTenant(
 	return out, nil
 }
 
-// requireKBAdmin asserts the actor can manage the KB's permissions.
+// ResolveExplicitPermission returns the actor's permission ONLY from the
+// authoritative sources: tenant owner/admin role, KB ownership, or an explicit
+// grant. Crucially it does NOT apply the legacy "no grants anywhere -> admin"
+// fallback that ResolvePermission uses for view/edit/delete continuity.
 //
-// GEÄNDERT: deliberately strict. Does NOT use ResolvePermission's rule-5
-// fallback (no-grants-anywhere -> admin) because that would let any tenant
-// member grant access on a fresh KB and effectively self-promote. Authority
-// here must come from one of: tenant owner/admin role, KB ownership, or an
-// explicit admin grant.
-func (s *kbPermissionService) requireKBAdmin(ctx context.Context, actor *types.User, kbID string) error {
+// Use this when authorizing any action that could escalate privilege:
+// granting/revoking access, changing permission level, transferring ownership.
+//
+// NOTE on TOCTOU: the kb argument is read once by the caller and the grant is
+// read separately. A concurrent role/grant change between those reads can lead
+// to a decision against a millisecond-old snapshot. This is acceptable for
+// per-request authorization (matches every other gate in the codebase that
+// trusts the auth-middleware-loaded actor); a stricter SELECT FOR UPDATE
+// transaction is reserved for operations whose outcome would be catastrophic
+// under such a race (e.g. owner demotion — see DemoteOwnerIfSafe).
+func (s *kbPermissionService) ResolveExplicitPermission(
+	ctx context.Context, actor *types.User, kb *types.KnowledgeBase,
+) (types.KBPermission, bool, error) {
 	if actor == nil {
-		return errors.New("actor required")
+		return "", false, errors.New("user required")
 	}
+	if kb == nil || kb.TenantID != actor.TenantID {
+		return "", false, nil
+	}
+	if actor.Role == types.UserRoleOwner || actor.Role == types.UserRoleAdmin {
+		return types.KBPermissionAdmin, true, nil
+	}
+	if kb.OwnerID != "" && kb.OwnerID == actor.ID {
+		return types.KBPermissionAdmin, true, nil
+	}
+	grant, gerr := s.repo.GetByKBAndUser(ctx, kb.ID, actor.ID)
+	if gerr == nil {
+		return grant.Permission, true, nil
+	}
+	if !errors.Is(gerr, apprepo.ErrKBPermissionNotFound) {
+		return "", false, gerr
+	}
+	return "", false, nil
+}
+
+// requireKBAdmin asserts the actor can manage the KB's permissions. Routes to
+// ResolveExplicitPermission so a tenant member on a grant-less KB cannot
+// self-promote into an admin grant.
+func (s *kbPermissionService) requireKBAdmin(ctx context.Context, actor *types.User, kbID string) error {
 	kb, err := s.kbRepo.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
 		return fmt.Errorf("failed to load knowledge base: %w", err)
 	}
-	if kb == nil || kb.TenantID != actor.TenantID {
+	if kb == nil {
 		return errors.New("permission denied")
 	}
-	if actor.Role == types.UserRoleOwner || actor.Role == types.UserRoleAdmin {
-		return nil
+	perm, ok, err := s.ResolveExplicitPermission(ctx, actor, kb)
+	if err != nil {
+		return err
 	}
-	if kb.OwnerID != "" && kb.OwnerID == actor.ID {
-		return nil
+	if !ok || !perm.HasAtLeast(types.KBPermissionAdmin) {
+		return errors.New("permission denied")
 	}
-	grant, gerr := s.repo.GetByKBAndUser(ctx, kbID, actor.ID)
-	if gerr == nil && grant.Permission == types.KBPermissionAdmin {
-		return nil
-	}
-	if gerr != nil && !errors.Is(gerr, apprepo.ErrKBPermissionNotFound) {
-		return gerr
-	}
-	return errors.New("permission denied")
+	return nil
 }
