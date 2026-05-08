@@ -25,6 +25,17 @@ func (r *fakeRoleRepo) GetPermissionsForRole(_ context.Context, roleID string) (
 	return r.permsByRole[roleID], nil
 }
 
+// NEU: matches the new batch-lookup method on RoleRepository.
+func (r *fakeRoleRepo) GetPermissionsForRoles(_ context.Context, roleIDs []string) (map[string]map[string]bool, error) {
+	out := make(map[string]map[string]bool, len(roleIDs))
+	for _, id := range roleIDs {
+		if perms, ok := r.permsByRole[id]; ok {
+			out[id] = perms
+		}
+	}
+	return out, nil
+}
+
 // Unused methods — panic so a future signature change reaches us through the test surface.
 func (r *fakeRoleRepo) CreateRole(context.Context, *types.Role) error                  { panic("not used") }
 func (r *fakeRoleRepo) UpdateRole(context.Context, *types.Role) error                  { panic("not used") }
@@ -173,6 +184,35 @@ func Test_Resolve_SeedMissingReturnsError(t *testing.T) {
 	_, err := resolver.Resolve(context.Background(), user)
 	if err != ErrRoleSeedMissing {
 		t.Errorf("expected ErrRoleSeedMissing, got %v", err)
+	}
+}
+
+// NEU: regression test for the partial-seed safety net. When migration ran but
+// only seeded a subset of permission flags for a system role (e.g. the SQLite
+// migration was interrupted between INSERTs), len(rolePerms) > 0 but
+// < catalog. Without the catalog-length check this would silently degrade
+// owner/admin to limited permissions; with the check it surfaces as
+// ErrRoleSeedMissing so the legacy hard-coded fallback kicks in instead.
+func Test_Resolve_PartialSeedReturnsError(t *testing.T) {
+	repo := &fakeRoleRepo{
+		rolesByKey: map[string]*types.Role{
+			types.SystemRoleKeyOwner: {ID: "role-owner", Key: types.SystemRoleKeyOwner, IsSystem: true},
+		},
+		permsByRole: map[string]map[string]bool{
+			// Only 3 of the 6 catalog flags seeded — represents an interrupted
+			// migration. Catalog has 6 entries so the check fires.
+			"role-owner": {
+				types.PermissionChat:    true,
+				types.PermissionSearch:  true,
+				types.PermissionCreateKB: true,
+			},
+		},
+	}
+	resolver := NewPermissionResolverService(repo, nil)
+	user := &types.User{ID: "u1", TenantID: 42, Role: types.UserRoleOwner}
+	_, err := resolver.Resolve(context.Background(), user)
+	if err != ErrRoleSeedMissing {
+		t.Errorf("expected ErrRoleSeedMissing for partial seed, got %v", err)
 	}
 }
 

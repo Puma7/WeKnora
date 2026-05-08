@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -65,38 +66,64 @@ func (s *permissionResolverService) Resolve(ctx context.Context, user *types.Use
 		return nil, err
 	}
 	// Safety: if the user's role is one of the four reserved system keys but
-	// the lookup found no permission rows, the seed migration probably hasn't
-	// run yet. Returning ErrRoleSeedMissing causes the middleware to skip
-	// cache population, falling back to the legacy hard-coded map in
-	// User.EffectivePermissions(). Better than caching all-deny which would
-	// silently lock owners out of their own tenant.
-	if len(rolePerms) == 0 && types.IsSystemRoleKey(string(user.Role)) {
+	// the lookup found fewer permission rows than the catalog defines, the
+	// seed migration probably ran partially (transient DB error mid-migration
+	// that wasn't rolled back atomically by the SQLite migrate driver, manual
+	// schema edit, etc.). Returning ErrRoleSeedMissing causes the middleware
+	// to skip cache population, falling back to the legacy hard-coded map in
+	// User.EffectivePermissions(). Better than caching a partial result which
+	// would silently lock owners out of their own admin features.
+	// GEÄNDERT: was len==0; now compares against catalog length so a partial
+	// seed (e.g. 3/6 rows) also triggers the safety fallback.
+	if types.IsSystemRoleKey(string(user.Role)) && len(rolePerms) < len(types.DefaultPermissionCatalog) {
 		return nil, ErrRoleSeedMissing
 	}
 	applyMapToPermissions(out, rolePerms)
 
 	// Step 2: group resolution. We OR group-allows on top of role base, but
 	// group-deny overrides role-allow (last-decision-wins inside groups too:
-	// alphabetical order via repo, so the same group set always resolves
-	// identically regardless of which one was edited last).
+	// stable order via repo's ORDER BY id, so the same group set always
+	// resolves identically regardless of which one was edited last).
 	if s.groupRepo != nil {
 		groups, err := s.groupRepo.ListGroupsForUser(ctx, user.ID)
 		if err != nil {
 			return nil, err
 		}
+		// GEÄNDERT: batch-load all group-role permission maps in one DB
+		// roundtrip instead of one per group. With 10 groups that's 1 query
+		// instead of 10. Empty input returns empty map cleanly.
+		groupRoleIDs := make([]string, 0, len(groups))
 		for _, g := range groups {
-			// 2a: group's role grants
 			if g.RoleID != nil && *g.RoleID != "" {
-				if rolePerms, err := s.permissionsForRoleID(ctx, *g.RoleID); err != nil {
-					return nil, err
-				} else {
+				groupRoleIDs = append(groupRoleIDs, *g.RoleID)
+			}
+		}
+		var groupRolePermsByID map[string]map[string]bool
+		if len(groupRoleIDs) > 0 {
+			groupRolePermsByID, err = s.roleRepo.GetPermissionsForRoles(ctx, groupRoleIDs)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, g := range groups {
+			// 2a: group's role grants (read from the batch result)
+			if g.RoleID != nil && *g.RoleID != "" {
+				if rolePerms, ok := groupRolePermsByID[*g.RoleID]; ok {
 					applyMapToPermissions(out, rolePerms)
 				}
 			}
 			// 2b: group's per-flag overrides (highest precedence within group)
 			if g.Permissions != nil {
 				var overrides types.UserPermissions
-				if err := g.Permissions.Unmarshal(&overrides); err == nil {
+				if uerr := g.Permissions.Unmarshal(&overrides); uerr != nil {
+					// GEÄNDERT: was silently swallowed. Corrupt JSON in a
+					// group permissions row used to evaporate the override
+					// without trace; now an operator gets a log line they
+					// can grep for. We deliberately keep going (override
+					// not applied = same observable effect) so a single bad
+					// row doesn't lock everyone out of the tenant.
+					logger.Warnf(ctx, "permission resolver: failed to unmarshal group %s permissions: %v", g.ID, uerr)
+				} else {
 					applyOverrides(out, &overrides)
 				}
 			}
@@ -106,7 +133,10 @@ func (s *permissionResolverService) Resolve(ctx context.Context, user *types.Use
 	// Step 1: user-explicit override (highest precedence overall).
 	if user.Permissions != nil {
 		var overrides types.UserPermissions
-		if err := user.Permissions.Unmarshal(&overrides); err == nil {
+		if uerr := user.Permissions.Unmarshal(&overrides); uerr != nil {
+			// GEÄNDERT: same logging fix as the group overrides path above.
+			logger.Warnf(ctx, "permission resolver: failed to unmarshal user %s permissions: %v", user.ID, uerr)
+		} else {
 			applyOverrides(out, &overrides)
 		}
 	}
@@ -152,9 +182,8 @@ func (s *permissionResolverService) permissionsForRoleKey(ctx context.Context, t
 	return s.roleRepo.GetPermissionsForRole(ctx, role.ID)
 }
 
-func (s *permissionResolverService) permissionsForRoleID(ctx context.Context, roleID string) (map[string]bool, error) {
-	return s.roleRepo.GetPermissionsForRole(ctx, roleID)
-}
+// GEÄNDERT: removed unused permissionsForRoleID helper. Group role permissions
+// are now batch-loaded via GetPermissionsForRoles in the resolver hot path.
 
 // emptyPermissions returns a UserPermissions with every flag set to a definite
 // false pointer. This makes downstream merging straightforward (no nil

@@ -63,13 +63,22 @@ type userService struct {
 	tenantService  interfaces.TenantService
 	invitationRepo interfaces.InvitationRepository
 	kbPermRepo     interfaces.KBPermissionRepository
-	config         *config.Config
+	// NEU: optional resolver used to populate EffectiveCache on the freshly
+	// updated user before returning it to handlers, so the API response
+	// reflects post-mutation effective permissions (especially relevant for
+	// custom roles where the legacy fallback in EffectivePermissions doesn't
+	// know about DB-defined role permissions).
+	resolver interfaces.PermissionResolverService
+	config   *config.Config
 }
 
 // NewUserService creates a new user service instance.
 // invitationRepo and kbPermRepo may be nil: callers that don't wire those systems
 // get the legacy behavior (open registration only, invite tokens always rejected,
 // no KB grant application).
+// GEÄNDERT: resolver param added. Pass nil in tests; it only affects the
+// returned UserInfo from the role/permission/active-toggle handlers — the
+// auth middleware always populates the cache at request time independently.
 func NewUserService(
 	configInfo *config.Config,
 	userRepo interfaces.UserRepository,
@@ -77,6 +86,7 @@ func NewUserService(
 	tenantService interfaces.TenantService,
 	invitationRepo interfaces.InvitationRepository,
 	kbPermRepo interfaces.KBPermissionRepository,
+	resolver interfaces.PermissionResolverService,
 ) interfaces.UserService {
 	return &userService{
 		userRepo:       userRepo,
@@ -84,7 +94,23 @@ func NewUserService(
 		tenantService:  tenantService,
 		invitationRepo: invitationRepo,
 		kbPermRepo:     kbPermRepo,
+		resolver:       resolver,
 		config:         configInfo,
+	}
+}
+
+// hydrateEffectiveCache fills u.EffectiveCache via the resolver if available.
+// NEU: helper used after any user-mutation API path so the response reflects
+// the post-update effective permissions (matches what the user will see on
+// their next request when the auth middleware repopulates the cache).
+// Errors are logged-and-swallowed so a transient resolver failure doesn't
+// break user updates.
+func (s *userService) hydrateEffectiveCache(ctx context.Context, u *types.User) {
+	if s.resolver == nil || u == nil {
+		return
+	}
+	if err := s.resolver.PopulateCache(ctx, u); err != nil {
+		logger.Warnf(ctx, "user service: failed to hydrate effective cache for user %s: %v", u.ID, err)
 	}
 }
 
@@ -812,7 +838,12 @@ func (s *userService) UpdateUserRole(ctx context.Context, actor *types.User, tar
 	if !actor.Can("manage_users") {
 		return nil, errors.New("permission denied")
 	}
-	if !role.IsValid() {
+	// GEÄNDERT: pre-RBAC v2 we required role.IsValid() (one of the 4 hard-coded
+	// keys). Custom roles must be assignable now, so we only reject the empty
+	// string and let the role/permission resolver determine validity at the
+	// next request — an unknown key resolves to all-deny rather than crashing,
+	// matching the safe-default behavior elsewhere in the resolver.
+	if string(role) == "" {
 		return nil, errors.New("invalid role")
 	}
 
@@ -850,10 +881,12 @@ func (s *userService) UpdateUserRole(ctx context.Context, actor *types.User, tar
 		}
 		// Reload to reflect the persisted change (role + updated_at).
 		if reloaded, rerr := s.userRepo.GetUserByID(ctx, target.ID); rerr == nil && reloaded != nil {
+			s.hydrateEffectiveCache(ctx, reloaded) // NEU
 			return reloaded, nil
 		}
 		target.Role = role
 		target.UpdatedAt = time.Now()
+		s.hydrateEffectiveCache(ctx, target) // NEU
 		return target, nil
 	}
 
@@ -862,6 +895,7 @@ func (s *userService) UpdateUserRole(ctx context.Context, actor *types.User, tar
 	if err := s.userRepo.UpdateUser(ctx, target); err != nil {
 		return nil, err
 	}
+	s.hydrateEffectiveCache(ctx, target) // NEU
 	return target, nil
 }
 
@@ -902,6 +936,7 @@ func (s *userService) UpdateUserPermissions(ctx context.Context, actor *types.Us
 	if err := s.userRepo.UpdateUser(ctx, target); err != nil {
 		return nil, err
 	}
+	s.hydrateEffectiveCache(ctx, target) // NEU: see hydrateEffectiveCache doc
 	return target, nil
 }
 
@@ -937,6 +972,7 @@ func (s *userService) SetUserActive(ctx context.Context, actor *types.User, targ
 		// Revoke all active tokens so the user is signed out everywhere.
 		_ = s.tokenRepo.RevokeTokensByUserID(ctx, target.ID)
 	}
+	s.hydrateEffectiveCache(ctx, target) // NEU
 	return target, nil
 }
 

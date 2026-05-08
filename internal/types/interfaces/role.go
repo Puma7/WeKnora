@@ -58,6 +58,10 @@ type RoleRepository interface {
 	LoadPermissions(ctx context.Context, roles []*types.Role) error
 	// GetPermissionsForRole returns the matrix row for one role.
 	GetPermissionsForRole(ctx context.Context, roleID string) (map[string]bool, error)
+	// NEU: GetPermissionsForRoles returns one matrix row per role in a single
+	// query. Used by the resolver hot path so a user with N groups doesn't
+	// trigger N separate role lookups per request.
+	GetPermissionsForRoles(ctx context.Context, roleIDs []string) (map[string]map[string]bool, error)
 	// SetPermission upserts one (role, key) pair.
 	SetPermission(ctx context.Context, roleID, key string, allowed bool) error
 	// ClearPermission deletes one (role, key) pair so the system default applies.

@@ -268,10 +268,18 @@ function openEditDialog(group: GroupInfo) {
 }
 
 async function onSubmitDialog() {
+  // GEÄNDERT: client-side validation; empty name fails server-side anyway
+  // but inline feedback keeps the dialog open and tells the user what's
+  // wrong without a round-trip.
+  const trimmedName = form.name.trim()
+  if (!trimmedName) {
+    MessagePlugin.warning(t('userManagement.groups.namePlaceholder'))
+    return false
+  }
   try {
     if (dialogMode.value === 'create') {
       const created = await createGroup({
-        name: form.name.trim(),
+        name: trimmedName,
         description: form.description.trim() || undefined,
         role_id: form.role_id || null,
       })
@@ -280,7 +288,7 @@ async function onSubmitDialog() {
       MessagePlugin.success(t('userManagement.groups.created'))
     } else if (form.id) {
       const updated = await updateGroup(form.id, {
-        name: form.name.trim(),
+        name: trimmedName,
         description: form.description.trim() || undefined,
         role_id: form.role_id || null,
       })

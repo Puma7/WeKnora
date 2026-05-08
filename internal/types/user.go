@@ -129,7 +129,13 @@ func (u *User) EffectivePermissions() UserPermissions {
 		return *u.EffectiveCache
 	}
 	role := u.Role
-	if !role.IsValid() {
+	// GEÄNDERT: only the truly-empty case falls back to Member. Custom-role
+	// strings (e.g. "marketing-editor") are NOT replaced — they fall through
+	// the legacy switch with no hardcoded defaults, which means custom-role
+	// users in the legacy fallback path get all-deny + their own overrides.
+	// That's the safe choice when the resolver isn't available; the operator
+	// must run the seed migration to make custom roles meaningful.
+	if role == "" {
 		role = UserRoleMember
 	}
 
@@ -302,9 +308,12 @@ type UserInfo struct {
 }
 
 // ToUserInfo converts User to UserInfo (without sensitive data)
+// GEÄNDERT: returns the actual stored role string (including custom roles).
+// Only the truly-empty role is replaced with Member as a safety net for
+// pre-RBAC users — never the case for users created after migration 000040.
 func (u *User) ToUserInfo() *UserInfo {
 	role := u.Role
-	if !role.IsValid() {
+	if role == "" {
 		role = UserRoleMember
 	}
 	return &UserInfo{

@@ -76,11 +76,16 @@ func (r *groupRepository) ListGroupsForTenant(ctx context.Context, tenantID uint
 // ListGroupsForUser is the hot path used by the resolver on every request.
 // We join via the membership table directly rather than loading members
 // separately to keep this single-query.
+// GEÄNDERT: explicit ORDER BY user_groups.id so the resolver's last-wins
+// merge is deterministic across requests. Without this, two groups with
+// conflicting permissions would resolve based on whatever order Postgres
+// chose for the join — flaky 403s between consecutive requests.
 func (r *groupRepository) ListGroupsForUser(ctx context.Context, userID string) ([]*types.UserGroup, error) {
 	var groups []*types.UserGroup
 	err := r.db.WithContext(ctx).
 		Joins("JOIN user_group_members m ON m.group_id = user_groups.id").
 		Where("m.user_id = ? AND user_groups.deleted_at IS NULL", userID).
+		Order("user_groups.id ASC").
 		Find(&groups).Error
 	if err != nil {
 		return nil, err
@@ -150,11 +155,16 @@ func (r *groupRepository) ListKBGrantsForKB(ctx context.Context, kbID string) ([
 // ListKBGrantsForUser pulls every KB grant from every group the user is in,
 // in a single join. The KB permission service merges this with direct user
 // grants when resolving access.
+// GEÄNDERT: ORDER BY id for the same determinism reason as ListGroupsForUser —
+// when two groups grant different permission levels on the same KB, the
+// service's "highest wins" pick still needs a stable tiebreaker for cases
+// where two grants compare equal (e.g. both viewer).
 func (r *groupRepository) ListKBGrantsForUser(ctx context.Context, userID string) ([]*types.GroupKBPermission, error) {
 	var grants []*types.GroupKBPermission
 	err := r.db.WithContext(ctx).
 		Joins("JOIN user_group_members m ON m.group_id = kb_group_permissions.group_id").
 		Where("m.user_id = ? AND kb_group_permissions.deleted_at IS NULL", userID).
+		Order("kb_group_permissions.id ASC").
 		Find(&grants).Error
 	if err != nil {
 		return nil, err

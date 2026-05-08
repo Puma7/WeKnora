@@ -157,6 +157,29 @@ func (r *roleRepository) GetPermissionsForRole(ctx context.Context, roleID strin
 	return out, nil
 }
 
+// GetPermissionsForRoles is the batch variant. NEU: returns one matrix row
+// per role in a single query so the resolver can hydrate a user with N group
+// memberships without N separate roundtrips.
+func (r *roleRepository) GetPermissionsForRoles(ctx context.Context, roleIDs []string) (map[string]map[string]bool, error) {
+	out := make(map[string]map[string]bool, len(roleIDs))
+	if len(roleIDs) == 0 {
+		return out, nil
+	}
+	var rows []types.RolePermission
+	if err := r.db.WithContext(ctx).Where("role_id IN ?", roleIDs).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		bucket, ok := out[row.RoleID]
+		if !ok {
+			bucket = make(map[string]bool)
+			out[row.RoleID] = bucket
+		}
+		bucket[row.PermissionKey] = row.Allowed
+	}
+	return out, nil
+}
+
 // SetPermission upserts the (role, key) row. ON CONFLICT DO UPDATE handles
 // both the "first time setting" and "flipping an existing value" paths.
 func (r *roleRepository) SetPermission(ctx context.Context, roleID, key string, allowed bool) error {

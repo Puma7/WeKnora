@@ -14,18 +14,23 @@ import (
 )
 
 type kbPermissionService struct {
-	repo     interfaces.KBPermissionRepository
-	userRepo interfaces.UserRepository
-	kbRepo   interfaces.KnowledgeBaseRepository
+	repo      interfaces.KBPermissionRepository
+	userRepo  interfaces.UserRepository
+	kbRepo    interfaces.KnowledgeBaseRepository
+	groupRepo interfaces.GroupRepository // NEU: required for group-level KB grant resolution
 }
 
 // NewKBPermissionService wires the per-user KB permission service.
+// GEÄNDERT: groupRepo added so group-level KB grants are actually enforced.
+// Pass nil in tests / minimal installs that don't enable groups; group-grant
+// resolution then degrades gracefully to a no-op without touching legacy paths.
 func NewKBPermissionService(
 	repo interfaces.KBPermissionRepository,
 	userRepo interfaces.UserRepository,
 	kbRepo interfaces.KnowledgeBaseRepository,
+	groupRepo interfaces.GroupRepository,
 ) interfaces.KBPermissionService {
-	return &kbPermissionService{repo: repo, userRepo: userRepo, kbRepo: kbRepo}
+	return &kbPermissionService{repo: repo, userRepo: userRepo, kbRepo: kbRepo, groupRepo: groupRepo}
 }
 
 // Grant adds (or revives) a permission for a user on a KB.
@@ -247,20 +252,40 @@ func (s *kbPermissionService) ResolvePermissionWithKB(
 	}
 
 	// Direct grant takes precedence over the legacy tenant-wide visibility.
-	grant, err := s.repo.GetByKBAndUser(ctx, kb.ID, user.ID)
-	if err == nil {
-		return grant.Permission, true, nil
-	}
-	if !errors.Is(err, apprepo.ErrKBPermissionNotFound) {
+	// GEÄNDERT: also fold in group-level grants. We compute the highest of
+	// (user direct grant, all group grants for this KB) so a user picks up
+	// admin via a group even if no direct row exists for them.
+	directGrant, err := s.repo.GetByKBAndUser(ctx, kb.ID, user.ID)
+	if err != nil && !errors.Is(err, apprepo.ErrKBPermissionNotFound) {
 		return "", false, err
 	}
-
-	// No grant for this user. Check if the KB has any grants at all.
-	hasGrants, err := s.repo.KBsWithAnyGrants(ctx, []string{kb.ID})
+	groupPerm, hasGroupGrant, err := s.highestGroupGrantForKB(ctx, user.ID, kb.ID)
 	if err != nil {
 		return "", false, err
 	}
-	if hasGrants[kb.ID] {
+	if err == nil && directGrant != nil {
+		best := directGrant.Permission
+		if hasGroupGrant && groupPerm.HasAtLeast(best) {
+			best = groupPerm
+		}
+		return best, true, nil
+	}
+	if hasGroupGrant {
+		return groupPerm, true, nil
+	}
+
+	// No grant for this user (direct or via group). Check if the KB has any
+	// grants at all — including group grants — to decide between "open KB"
+	// (legacy tenant-wide admin) and "restricted KB" (denied).
+	hasUserGrants, err := s.repo.KBsWithAnyGrants(ctx, []string{kb.ID})
+	if err != nil {
+		return "", false, err
+	}
+	hasAnyGroupGrants, err := s.kbHasAnyGroupGrants(ctx, kb.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if hasUserGrants[kb.ID] || hasAnyGroupGrants {
 		// KB has grants but not for this user -> restricted, no access.
 		return "", false, nil
 	}
@@ -310,7 +335,34 @@ func (s *kbPermissionService) FilterAccessibleSameTenant(
 		userGrants[g.KnowledgeBaseID] = struct{}{}
 	}
 
+	// NEU: same-shape lookup for group grants on these KBs. ListKBGrantsForUser
+	// returns the union of grants from every group the user is in; we filter
+	// to the input KB-ID set in memory rather than adding a third repo method.
+	groupGrantSet := make(map[string]struct{})
+	if s.groupRepo != nil {
+		groupGrants, gerr := s.groupRepo.ListKBGrantsForUser(ctx, user.ID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		sameTenantIDSet := make(map[string]struct{}, len(sameTenantIDs))
+		for _, id := range sameTenantIDs {
+			sameTenantIDSet[id] = struct{}{}
+		}
+		for _, g := range groupGrants {
+			if _, ok := sameTenantIDSet[g.KnowledgeBaseID]; ok {
+				groupGrantSet[g.KnowledgeBaseID] = struct{}{}
+			}
+		}
+	}
+
 	hasGrants, err := s.repo.KBsWithAnyGrants(ctx, sameTenantIDs)
+	if err != nil {
+		return nil, err
+	}
+	// NEU: a KB is "restricted" if it has either user-direct OR group grants.
+	// Without this, a KB granted only to a group falls into the legacy
+	// open-KB rule below and becomes visible to the entire tenant.
+	hasAnyGroupGrants, err := s.kbsHaveAnyGroupGrants(ctx, sameTenantIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -335,8 +387,13 @@ func (s *kbPermissionService) FilterAccessibleSameTenant(
 			out = append(out, kb)
 			continue
 		}
-		// No grants exist anywhere on this KB -> legacy tenant-wide visibility.
-		if !hasGrants[kb.ID] {
+		// NEU: has grant via group membership -> visible.
+		if _, ok := groupGrantSet[kb.ID]; ok {
+			out = append(out, kb)
+			continue
+		}
+		// No grants exist anywhere on this KB (user-direct or group) -> legacy tenant-wide visibility.
+		if !hasGrants[kb.ID] && !hasAnyGroupGrants[kb.ID] {
 			out = append(out, kb)
 			continue
 		}
@@ -376,13 +433,92 @@ func (s *kbPermissionService) ResolveExplicitPermission(
 		return types.KBPermissionAdmin, true, nil
 	}
 	grant, gerr := s.repo.GetByKBAndUser(ctx, kb.ID, actor.ID)
-	if gerr == nil {
-		return grant.Permission, true, nil
-	}
-	if !errors.Is(gerr, apprepo.ErrKBPermissionNotFound) {
+	if gerr != nil && !errors.Is(gerr, apprepo.ErrKBPermissionNotFound) {
 		return "", false, gerr
 	}
+	// NEU: fold the highest group-grant into the explicit-permission decision.
+	// Without this, a user who is admin on a KB only via a group could not
+	// grant access to other users (requireKBAdmin would deny them).
+	groupPerm, hasGroup, gerr2 := s.highestGroupGrantForKB(ctx, actor.ID, kb.ID)
+	if gerr2 != nil {
+		return "", false, gerr2
+	}
+	if grant != nil {
+		best := grant.Permission
+		if hasGroup && groupPerm.HasAtLeast(best) {
+			best = groupPerm
+		}
+		return best, true, nil
+	}
+	if hasGroup {
+		return groupPerm, true, nil
+	}
 	return "", false, nil
+}
+
+// highestGroupGrantForKB returns the strongest permission the user holds on the
+// given KB via any of their group memberships. Returns (perm, true, nil) when at
+// least one applicable grant exists; (perm, false, nil) when none do.
+// NEU: extracted helper so ResolvePermissionWithKB and ResolveExplicitPermission
+// share one resolution path for group grants and stay consistent.
+func (s *kbPermissionService) highestGroupGrantForKB(
+	ctx context.Context, userID, kbID string,
+) (types.KBPermission, bool, error) {
+	if s.groupRepo == nil {
+		return "", false, nil
+	}
+	grants, err := s.groupRepo.ListKBGrantsForUser(ctx, userID)
+	if err != nil {
+		return "", false, err
+	}
+	var best types.KBPermission
+	found := false
+	for _, g := range grants {
+		if g.KnowledgeBaseID != kbID {
+			continue
+		}
+		if !found || g.Permission.HasAtLeast(best) {
+			best = g.Permission
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
+// kbHasAnyGroupGrants reports whether ANY group has been granted access to the
+// given KB. NEU: needed so the resolver can distinguish a "restricted KB with
+// only group grants" (no access for non-members) from an "open KB" (legacy
+// tenant-wide admin). Single-KB convenience wrapper around kbsHaveAnyGroupGrants.
+func (s *kbPermissionService) kbHasAnyGroupGrants(ctx context.Context, kbID string) (bool, error) {
+	out, err := s.kbsHaveAnyGroupGrants(ctx, []string{kbID})
+	if err != nil {
+		return false, err
+	}
+	return out[kbID], nil
+}
+
+// kbsHaveAnyGroupGrants returns a set indicating which of the input KB IDs have
+// at least one active group grant. NEU: used by FilterAccessibleSameTenant to
+// classify each KB without an N+1 lookup.
+func (s *kbPermissionService) kbsHaveAnyGroupGrants(ctx context.Context, kbIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(kbIDs))
+	if s.groupRepo == nil || len(kbIDs) == 0 {
+		return out, nil
+	}
+	idSet := make(map[string]struct{}, len(kbIDs))
+	for _, id := range kbIDs {
+		idSet[id] = struct{}{}
+	}
+	for _, kbID := range kbIDs {
+		grants, err := s.groupRepo.ListKBGrantsForKB(ctx, kbID)
+		if err != nil {
+			return nil, err
+		}
+		if len(grants) > 0 {
+			out[kbID] = true
+		}
+	}
+	return out, nil
 }
 
 // requireKBAdmin asserts the actor can manage the KB's permissions. Routes to

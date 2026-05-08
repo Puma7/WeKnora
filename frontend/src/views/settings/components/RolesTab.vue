@@ -155,8 +155,14 @@ function permissionLabel(entry: PermissionCatalogEntry): string {
 }
 
 function cellValue(role: RoleInfo, key: string): 'default' | 'allow' | 'deny' {
-  if (!(key in role.permissions)) return 'default'
-  return role.permissions[key] ? 'allow' : 'deny'
+  // GEÄNDERT: tolerate role.permissions === null/undefined (older backends or
+  // a transient response with the field stripped). The `in` operator throws
+  // on non-objects, so guard it explicitly. Falls through to 'default' which
+  // renders as the safe "use system default" cell.
+  const perms = role.permissions
+  if (!perms || typeof perms !== 'object') return 'default'
+  if (!(key in perms)) return 'default'
+  return perms[key] ? 'allow' : 'deny'
 }
 
 async function refreshRoles() {
@@ -219,11 +225,27 @@ function openEditDialog(role: RoleInfo) {
 }
 
 async function onSubmitDialog() {
+  // GEÄNDERT: client-side validation before round-trip. Empty key or label
+  // would have failed server-side anyway, but giving the user immediate
+  // inline feedback (toast + leave dialog open) is a better UX than the
+  // generic error toast that closes the dialog.
+  const trimmedKey = form.key.trim()
+  const trimmedLabel = form.label.trim()
+  if (!trimmedKey || !trimmedLabel) {
+    MessagePlugin.warning(t('userManagement.roles.labelLabel') + ' / ' + t('userManagement.roles.keyLabel'))
+    return false
+  }
+  // Lowercase + alphanumeric/dash/underscore only — matches server-side validation
+  // in role.go validateRoleInput. Catching it here avoids a round-trip.
+  if (!/^[a-z0-9_-]+$/.test(trimmedKey)) {
+    MessagePlugin.warning(t('userManagement.roles.keyPlaceholder'))
+    return false
+  }
   try {
     if (dialogMode.value === 'create') {
       const created = await createRole({
-        key: form.key.trim(),
-        label: form.label.trim(),
+        key: trimmedKey,
+        label: trimmedLabel,
         description: form.description.trim() || undefined,
       })
       roles.value.push(created)
@@ -231,8 +253,8 @@ async function onSubmitDialog() {
       MessagePlugin.success(t('userManagement.roles.created'))
     } else if (form.id) {
       const updated = await updateRole(form.id, {
-        key: form.key.trim(),
-        label: form.label.trim(),
+        key: trimmedKey,
+        label: trimmedLabel,
         description: form.description.trim() || undefined,
       })
       const idx = roles.value.findIndex(r => r.id === updated.id)
