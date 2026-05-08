@@ -12,6 +12,12 @@
       <button :class="{ active: tab === 'invitations' }" @click="tab = 'invitations'">
         {{ t('userManagement.tabs.invitations') }}
       </button>
+      <button :class="{ active: tab === 'roles' }" @click="tab = 'roles'">
+        {{ t('userManagement.tabs.roles') }}
+      </button>
+      <button :class="{ active: tab === 'groups' }" @click="tab = 'groups'">
+        {{ t('userManagement.tabs.groups') }}
+      </button>
     </div>
 
     <!-- Users tab -->
@@ -67,6 +73,16 @@
       </div>
     </div>
 
+    <!-- Roles tab (lazy-mounted) -->
+    <div v-else-if="tab === 'roles'" class="panel">
+      <RolesTab />
+    </div>
+
+    <!-- Groups tab (lazy-mounted) -->
+    <div v-else-if="tab === 'groups'" class="panel">
+      <GroupsTab />
+    </div>
+
     <!-- Invitations tab -->
     <div v-else class="panel">
       <div class="invite-form">
@@ -99,7 +115,7 @@
             :placeholder="t('userManagement.invite.notePlaceholder')"
             class="text-input wide"
           />
-          <t-button theme="primary" :disabled="!canSubmitInvite" @click="onCreateInvite">
+          <t-button v-can="'invite_users'" theme="primary" :disabled="!canSubmitInvite" @click="onCreateInvite">
             {{ t('userManagement.invite.submit') }}
           </t-button>
         </div>
@@ -194,6 +210,8 @@ import {
   updateUserRole,
 } from '@/api/admin'
 import { useAuthStore } from '@/stores/auth'
+import RolesTab from '@/views/settings/components/RolesTab.vue'
+import GroupsTab from '@/views/settings/components/GroupsTab.vue'
 
 const { t } = useI18n()
 const auth = useAuthStore()
@@ -202,7 +220,7 @@ const currentUserId = computed(() => auth.user?.id || '')
 const currentUserRole = computed<UserRole>(() => (auth.user?.role as UserRole | undefined) || 'member')
 const ROLE_LEVELS: Record<UserRole, number> = { owner: 4, admin: 3, member: 2, viewer: 1 }
 
-const tab = ref<'users' | 'invitations'>('users')
+const tab = ref<'users' | 'invitations' | 'roles' | 'groups'>('users')
 
 // Users tab state
 const users = ref<AdminUserInfo[]>([])

@@ -12,6 +12,7 @@ import i18n from "./i18n";
 import { initTheme } from "@/composables/useTheme";
 import { initFont } from "@/composables/useFont";
 import { installTDesignIconOfflineGuard } from "@/utils/tdesign-icon-offline";
+import { vCan } from "@/directives/can";
 
 // 必须在 Vue 组件挂载之前执行，避免 tdesign-icons 运行时请求 tdesign.gtimg.com
 installTDesignIconOfflineGuard();
@@ -25,6 +26,9 @@ app.use(TDesign);
 app.use(createPinia());
 app.use(router);
 app.use(i18n);
+
+// v-can — automatic permission gating for any element. See src/directives/can.ts.
+app.directive("can", vCan);
 
 // 等首屏路由（含导航守卫、Lite 自动登录）完成后再挂载，避免先闪默认页再跳转
 router.isReady().finally(() => {

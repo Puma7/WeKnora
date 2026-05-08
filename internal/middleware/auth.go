@@ -66,10 +66,22 @@ func canAccessTenant(user *types.User, targetTenantID uint64, cfg *config.Config
 }
 
 // Auth 认证中间件
+//
+// PERMISSION RESOLVER INTEGRATION:
+// When permResolver is non-nil, every authenticated request has its
+// user.EffectiveCache populated by calling permResolver.PopulateCache(user).
+// Downstream user.Can(flag) and user.EffectivePermissions() then read from
+// the cache, accounting for custom roles, group membership, and tenant role
+// overrides. When the resolver fails (DB hiccup, missing role rows), we log
+// and continue — user.EffectivePermissions() falls back to the legacy
+// hard-coded role map so a misconfigured deploy doesn't lock everyone out.
+// permResolver may be nil (tests, Lite first-boot before the resolver is
+// wired); the system then operates exclusively under the legacy fallback.
 func Auth(
 	tenantService interfaces.TenantService,
 	userService interfaces.UserService,
 	cfg *config.Config,
+	permResolver interfaces.PermissionResolverService,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// ignore OPTIONS request
@@ -91,6 +103,18 @@ func Auth(
 			user, err := userService.ValidateToken(c.Request.Context(), token)
 			if err == nil && user != nil {
 				// JWT Token认证成功
+				// Populate effective-permission cache before any downstream
+				// handler reads user.Can(flag). If the resolver errors out,
+				// we log and continue — the legacy hard-coded fallback in
+				// user.EffectivePermissions() keeps the request usable.
+				// Errors here include the case where the RBAC v2 seed
+				// migration hasn't run (logged once per request, but the
+				// app stays functional via the legacy code path).
+				if permResolver != nil {
+					if perr := permResolver.PopulateCache(c.Request.Context(), user); perr != nil {
+						log.Printf("permission resolver: %v (user=%s) — falling back to legacy role map", perr, user.ID)
+					}
+				}
 				// 检查是否有跨租户访问请求
 				targetTenantID := user.TenantID
 				tenantHeader := c.GetHeader("X-Tenant-ID")

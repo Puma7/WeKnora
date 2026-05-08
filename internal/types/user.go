@@ -95,6 +95,11 @@ type User struct {
 	Permissions *JSON `json:"permissions,omitempty" gorm:"type:jsonb"`
 	// User ID of the admin who invited this account; empty for self-registered or OIDC users
 	InvitedByUserID string `json:"invited_by_user_id,omitempty" gorm:"type:varchar(36);column:invited_by_user_id"`
+	// EffectiveCache is filled by the auth middleware via PermissionResolverService
+	// before the request reaches a handler. When non-nil, EffectivePermissions()
+	// returns it directly instead of running the legacy hard-coded resolution.
+	// Not persisted (gorm:"-"), not serialized (json:"-").
+	EffectiveCache *UserPermissions `json:"-" gorm:"-"`
 	// Creation time of the user
 	CreatedAt time.Time `json:"created_at"`
 	// Last updated time of the user
@@ -106,9 +111,23 @@ type User struct {
 	Tenant *Tenant `json:"tenant,omitempty" gorm:"foreignKey:TenantID"`
 }
 
-// EffectivePermissions returns the user's effective feature flags, applying
-// role-based defaults plus any explicit overrides stored in u.Permissions.
+// EffectivePermissions returns the user's effective feature flags.
+//
+// Resolution order:
+//  1. EffectiveCache (filled by PermissionResolverService inside the auth
+//     middleware) — preferred, since it accounts for custom roles, group
+//     membership, and tenant-scoped role overrides
+//  2. Legacy hard-coded role map — defense-in-depth fallback for code paths
+//     that don't go through the resolver (tests, Lite first-boot before the
+//     service is wired, internal jobs that call user.Can() with a stub User)
+//
+// The legacy map is intentionally preserved exactly as-is so a misconfigured
+// deploy where the resolver fails to populate the cache degrades gracefully
+// to the pre-RBACv2 behavior rather than locking everyone out.
 func (u *User) EffectivePermissions() UserPermissions {
+	if u.EffectiveCache != nil {
+		return *u.EffectiveCache
+	}
 	role := u.Role
 	if !role.IsValid() {
 		role = UserRoleMember

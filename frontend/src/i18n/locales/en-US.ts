@@ -1302,8 +1302,8 @@ export default {
     welcome: 'Welcome aboard!'
   },
   userManagement: {
-    title: 'Users & invitations',
-    description: 'Manage users, roles, and invitations within your tenant.',
+    title: 'Users & access',
+    description: 'Manage users, roles, groups, and invitations within your tenant.',
     loading: 'Loading...',
     loadFailed: 'Failed to load',
     noUsers: 'No users yet',
@@ -1314,7 +1314,7 @@ export default {
     roleUpdated: 'Role updated',
     permissionsUpdated: 'Permissions updated',
     updateFailed: 'Operation failed',
-    tabs: { users: 'Members', invitations: 'Invitations' },
+    tabs: { users: 'Members', invitations: 'Invitations', roles: 'Roles', groups: 'Groups' },
     role: { owner: 'Owner', admin: 'Admin', member: 'Member', viewer: 'Viewer' },
     invite: {
       heading: 'Send an invitation',
@@ -1347,6 +1347,72 @@ export default {
         can_manage_users: 'Manage users',
         can_manage_kbs: 'Manage knowledge bases'
       }
+    },
+    roles: {
+      heading: 'Roles & permissions',
+      description: 'System roles ship with the product and cannot be edited. Custom roles let you define your own permission set for users and groups.',
+      empty: 'No custom roles yet. Create one to tailor permissions for your tenant.',
+      systemBadge: 'System',
+      keyLabel: 'Key',
+      keyPlaceholder: 'e.g. marketing_editor',
+      labelLabel: 'Display name',
+      labelPlaceholder: 'e.g. Marketing Editor',
+      descriptionPlaceholder: 'Optional description',
+      createTitle: 'Create custom role',
+      editTitle: 'Edit role',
+      create: 'Create role',
+      created: 'Role created',
+      updated: 'Role updated',
+      deleted: 'Role deleted',
+      deleteConfirm: 'Delete role "{label}"? Users still using it must be reassigned first.',
+      deleteInUse: 'This role is still in use by {users} user(s) and {groups} group(s). Reassign them before deleting.',
+      lockedSystem: 'System roles cannot be modified. Create a custom role to define your own permission set.'
+    },
+    matrix: {
+      title: 'Permission matrix',
+      hint: 'Toggle each flag to allow or deny it for this role. Empty cells fall back to the system default.',
+      useDefault: 'Default',
+      allow: 'Allow',
+      deny: 'Deny',
+      headers: { permission: 'Permission', value: 'Decision' }
+    },
+    groups: {
+      heading: 'User groups',
+      description: 'Groups bundle users together and let you grant a base role plus per-flag overrides. KB grants made to a group apply to every member.',
+      empty: 'No groups yet.',
+      create: 'Create group',
+      createTitle: 'Create group',
+      editTitle: 'Edit group',
+      nameLabel: 'Name',
+      namePlaceholder: 'e.g. marketing',
+      descriptionPlaceholder: 'Optional description',
+      roleLabel: 'Base role',
+      noRole: 'No role override',
+      memberCount: '{count} member(s)',
+      members: 'Members',
+      addMember: 'Add member',
+      removeMember: 'Remove',
+      addMemberSearchPlaceholder: 'Search by email or username...',
+      created: 'Group created',
+      updated: 'Group updated',
+      deleted: 'Group deleted',
+      deleteConfirm: 'Delete group "{name}"? Members will lose any group-only permissions.'
+    }
+  },
+  permissions: {
+    deniedDefault: 'You do not have permission for this action. Please ask your administrator.',
+    flags: {
+      chat: { label: 'Chat' },
+      search: { label: 'Search' },
+      create_kb: { label: 'Create knowledge base' },
+      invite_users: { label: 'Invite users' },
+      manage_users: { label: 'Manage users & roles' },
+      manage_kbs: { label: 'Manage knowledge bases' }
+    },
+    categories: {
+      consume: 'Consume',
+      create: 'Create',
+      manage: 'Manage'
     }
   },
   authStore: {

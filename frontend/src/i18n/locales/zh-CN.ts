@@ -1171,8 +1171,8 @@ export default {
     welcome: "欢迎加入！",
   },
   userManagement: {
-    title: "用户与邀请管理",
-    description: "管理租户内的用户、角色和邀请",
+    title: "用户与访问控制",
+    description: "管理租户内的用户、角色、用户组和邀请",
     loading: "正在加载...",
     loadFailed: "加载失败",
     noUsers: "暂无用户",
@@ -1183,7 +1183,7 @@ export default {
     roleUpdated: "角色已更新",
     permissionsUpdated: "权限已更新",
     updateFailed: "操作失败",
-    tabs: { users: "成员", invitations: "邀请" },
+    tabs: { users: "成员", invitations: "邀请", roles: "角色", groups: "用户组" },
     role: { owner: "所有者", admin: "管理员", member: "成员", viewer: "查看者" },
     invite: {
       heading: "发送邀请",
@@ -1217,6 +1217,72 @@ export default {
         can_manage_kbs: "管理知识库",
       },
     },
+    roles: {
+      heading: "角色与权限",
+      description: "系统角色随产品提供，无法编辑。自定义角色可让您为用户和用户组定义专属的权限组合。",
+      empty: "暂无自定义角色。创建自定义角色以为租户量身定制权限。",
+      systemBadge: "系统",
+      keyLabel: "标识",
+      keyPlaceholder: "例如 marketing_editor",
+      labelLabel: "显示名称",
+      labelPlaceholder: "例如 营销编辑",
+      descriptionPlaceholder: "可选描述",
+      createTitle: "创建自定义角色",
+      editTitle: "编辑角色",
+      create: "创建角色",
+      created: "角色已创建",
+      updated: "角色已更新",
+      deleted: "角色已删除",
+      deleteConfirm: "确定删除角色 \"{label}\"？仍在使用此角色的用户必须先重新分配。",
+      deleteInUse: "此角色仍被 {users} 个用户和 {groups} 个用户组使用，请先重新分配。",
+      lockedSystem: "系统角色不可修改。请创建一个自定义角色来定义您自己的权限集。"
+    },
+    matrix: {
+      title: "权限矩阵",
+      hint: "切换每一项以允许或拒绝该角色的对应权限。空白单元格回退到系统默认。",
+      useDefault: "默认",
+      allow: "允许",
+      deny: "拒绝",
+      headers: { permission: "权限", value: "决定" }
+    },
+    groups: {
+      heading: "用户组",
+      description: "用户组将用户聚合在一起，并允许您为成员授予基础角色和单独的权限覆盖。授予用户组的知识库权限将作用于每个成员。",
+      empty: "暂无用户组。",
+      create: "创建用户组",
+      createTitle: "创建用户组",
+      editTitle: "编辑用户组",
+      nameLabel: "名称",
+      namePlaceholder: "例如 marketing",
+      descriptionPlaceholder: "可选描述",
+      roleLabel: "基础角色",
+      noRole: "无角色覆盖",
+      memberCount: "{count} 名成员",
+      members: "成员",
+      addMember: "添加成员",
+      removeMember: "移除",
+      addMemberSearchPlaceholder: "按邮箱或用户名搜索...",
+      created: "用户组已创建",
+      updated: "用户组已更新",
+      deleted: "用户组已删除",
+      deleteConfirm: "确定删除用户组 \"{name}\"？成员将失去仅由该用户组授予的权限。"
+    }
+  },
+  permissions: {
+    deniedDefault: "您没有权限执行此操作，请联系管理员。",
+    flags: {
+      chat: { label: "聊天" },
+      search: { label: "搜索" },
+      create_kb: { label: "创建知识库" },
+      invite_users: { label: "邀请用户" },
+      manage_users: { label: "管理用户与角色" },
+      manage_kbs: { label: "管理知识库" }
+    },
+    categories: {
+      consume: "使用",
+      create: "创建",
+      manage: "管理"
+    }
   },
   authStore: {
     errors: {

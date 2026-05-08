@@ -72,6 +72,9 @@ type RouterParams struct {
 	InvitationHandler        *handler.InvitationHandler
 	AdminUserHandler         *handler.AdminUserHandler
 	KBPermissionHandler      *handler.KBPermissionHandler
+	AdminRoleHandler         *handler.AdminRoleHandler
+	AdminGroupHandler        *handler.AdminGroupHandler
+	PermissionResolver       interfaces.PermissionResolverService
 }
 
 // NewRouter 创建新的路由
@@ -139,7 +142,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 	RegisterIMRoutes(r, params.IMHandler)
 
 	// 认证中间件
-	r.Use(middleware.Auth(params.TenantService, params.UserService, params.Config))
+	r.Use(middleware.Auth(params.TenantService, params.UserService, params.Config, params.PermissionResolver))
 
 	// 文件服务：统一代理本地/MinIO/COS/TOS存储后端（需要认证）
 	serveFiles(r, params.FileService)
@@ -187,6 +190,8 @@ func NewRouter(params RouterParams) *gin.Engine {
 		RegisterAdminInvitationRoutes(v1, params.InvitationHandler)
 		RegisterAdminUserRoutes(v1, params.AdminUserHandler)
 		RegisterKBPermissionRoutes(v1, params.KBPermissionHandler)
+		RegisterAdminRoleRoutes(v1, params.AdminRoleHandler)
+		RegisterAdminGroupRoutes(v1, params.AdminGroupHandler)
 	}
 
 	return r
@@ -501,6 +506,44 @@ func RegisterAdminUserRoutes(r *gin.RouterGroup, h *handler.AdminUserHandler) {
 		g.PUT("/:id/role", h.UpdateUserRole)
 		g.PUT("/:id/permissions", h.UpdateUserPermissions)
 		g.PUT("/:id/active", h.SetUserActive)
+	}
+}
+
+// RegisterAdminRoleRoutes registers admin-only role + permission-matrix routes.
+// The catalog endpoint is also under the same gate; while the catalog is not
+// sensitive (just a list of flag keys), keeping it gated avoids exposing the
+// surface area of internal feature flags to non-admin users.
+func RegisterAdminRoleRoutes(r *gin.RouterGroup, h *handler.AdminRoleHandler) {
+	g := r.Group("/admin/roles", middleware.RequireFeature("manage_users"))
+	{
+		g.GET("", h.ListRoles)
+		g.POST("", h.CreateRole)
+		g.GET("/permission-catalog", h.GetPermissionCatalog)
+		g.GET("/:id", h.GetRole)
+		// Both PUT and PATCH accepted: PATCH is the semantically correct verb
+		// for partial updates, but the frontend's request util only ships
+		// get/post/put/del — keeping both verbs avoids expanding that util.
+		g.PUT("/:id", h.UpdateRole)
+		g.PATCH("/:id", h.UpdateRole)
+		g.DELETE("/:id", h.DeleteRole)
+		g.PUT("/:id/permissions/:key", h.SetRolePermission)
+	}
+}
+
+// RegisterAdminGroupRoutes registers admin-only group management routes.
+func RegisterAdminGroupRoutes(r *gin.RouterGroup, h *handler.AdminGroupHandler) {
+	g := r.Group("/admin/groups", middleware.RequireFeature("manage_users"))
+	{
+		g.GET("", h.ListGroups)
+		g.POST("", h.CreateGroup)
+		g.GET("/:id", h.GetGroup)
+		g.PUT("/:id", h.UpdateGroup)
+		g.PATCH("/:id", h.UpdateGroup)
+		g.DELETE("/:id", h.DeleteGroup)
+		g.GET("/:id/members", h.ListMembers)
+		g.POST("/:id/members", h.AddMember)
+		g.DELETE("/:id/members/:user_id", h.RemoveMember)
+		g.PUT("/:id/permissions/:key", h.SetGroupPermission)
 	}
 }
 

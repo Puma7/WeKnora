@@ -1156,8 +1156,8 @@ export default {
     welcome: "환영합니다!",
   },
   userManagement: {
-    title: "사용자 및 초대 관리",
-    description: "테넌트 내 사용자, 역할, 초대를 관리합니다.",
+    title: "사용자 및 액세스 제어",
+    description: "테넌트 내 사용자, 역할, 그룹, 초대를 관리합니다.",
     loading: "불러오는 중...",
     loadFailed: "불러오기 실패",
     noUsers: "사용자가 없습니다",
@@ -1168,7 +1168,7 @@ export default {
     roleUpdated: "역할이 업데이트되었습니다",
     permissionsUpdated: "권한이 업데이트되었습니다",
     updateFailed: "작업 실패",
-    tabs: { users: "구성원", invitations: "초대" },
+    tabs: { users: "구성원", invitations: "초대", roles: "역할", groups: "그룹" },
     role: { owner: "소유자", admin: "관리자", member: "구성원", viewer: "뷰어" },
     invite: {
       heading: "초대 보내기",
@@ -1202,6 +1202,72 @@ export default {
         can_manage_kbs: "지식베이스 관리",
       },
     },
+    roles: {
+      heading: "역할 및 권한",
+      description: "시스템 역할은 제품과 함께 제공되며 편집할 수 없습니다. 사용자 정의 역할을 통해 사용자 및 그룹별 고유 권한 세트를 정의할 수 있습니다.",
+      empty: "사용자 정의 역할이 없습니다. 새로 만들어 테넌트별 권한을 구성하세요.",
+      systemBadge: "시스템",
+      keyLabel: "키",
+      keyPlaceholder: "예: marketing_editor",
+      labelLabel: "표시 이름",
+      labelPlaceholder: "예: 마케팅 편집자",
+      descriptionPlaceholder: "선택 사항: 설명",
+      createTitle: "사용자 정의 역할 생성",
+      editTitle: "역할 편집",
+      create: "역할 생성",
+      created: "역할이 생성되었습니다",
+      updated: "역할이 업데이트되었습니다",
+      deleted: "역할이 삭제되었습니다",
+      deleteConfirm: "역할 \"{label}\"을(를) 삭제하시겠습니까? 이 역할을 사용 중인 사용자는 먼저 다시 할당해야 합니다.",
+      deleteInUse: "이 역할은 아직 {users}명의 사용자와 {groups}개의 그룹에서 사용 중입니다. 먼저 다시 할당해 주세요.",
+      lockedSystem: "시스템 역할은 수정할 수 없습니다. 사용자 정의 역할을 만들어 고유 권한을 정의하세요."
+    },
+    matrix: {
+      title: "권한 매트릭스",
+      hint: "각 항목을 전환하여 이 역할의 권한을 허용하거나 거부합니다. 빈 셀은 시스템 기본값으로 돌아갑니다.",
+      useDefault: "기본값",
+      allow: "허용",
+      deny: "거부",
+      headers: { permission: "권한", value: "결정" }
+    },
+    groups: {
+      heading: "사용자 그룹",
+      description: "그룹은 사용자를 함께 묶고 기본 역할과 플래그별 재정의를 부여할 수 있게 해줍니다. 그룹에 부여된 지식베이스 권한은 모든 구성원에 적용됩니다.",
+      empty: "그룹이 없습니다.",
+      create: "그룹 생성",
+      createTitle: "그룹 생성",
+      editTitle: "그룹 편집",
+      nameLabel: "이름",
+      namePlaceholder: "예: marketing",
+      descriptionPlaceholder: "선택 사항: 설명",
+      roleLabel: "기본 역할",
+      noRole: "역할 재정의 없음",
+      memberCount: "구성원 {count}명",
+      members: "구성원",
+      addMember: "구성원 추가",
+      removeMember: "제거",
+      addMemberSearchPlaceholder: "이메일 또는 사용자 이름으로 검색...",
+      created: "그룹이 생성되었습니다",
+      updated: "그룹이 업데이트되었습니다",
+      deleted: "그룹이 삭제되었습니다",
+      deleteConfirm: "그룹 \"{name}\"을(를) 삭제하시겠습니까? 구성원은 그룹 전용 권한을 잃게 됩니다."
+    }
+  },
+  permissions: {
+    deniedDefault: "이 작업을 수행할 권한이 없습니다. 관리자에게 문의하세요.",
+    flags: {
+      chat: { label: "채팅" },
+      search: { label: "검색" },
+      create_kb: { label: "지식베이스 생성" },
+      invite_users: { label: "사용자 초대" },
+      manage_users: { label: "사용자 및 역할 관리" },
+      manage_kbs: { label: "지식베이스 관리" }
+    },
+    categories: {
+      consume: "사용",
+      create: "생성",
+      manage: "관리"
+    }
   },
   kbPermissions: {
     menuItem: "사용자 권한",

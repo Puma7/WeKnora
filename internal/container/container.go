@@ -151,6 +151,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewTenantDisabledSharedAgentRepository))
 	must(container.Provide(repository.NewInvitationRepository))
 	must(container.Provide(repository.NewKBPermissionRepository))
+	must(container.Provide(repository.NewRoleRepository))
+	must(container.Provide(repository.NewGroupRepository))
 	must(container.Provide(service.NewWebSearchStateService))
 	must(container.Provide(repository.NewDataSourceRepository))
 	must(container.Provide(repository.NewSyncLogRepository))
@@ -183,6 +185,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	}))
 	must(container.Provide(service.NewInvitationService))
 	must(container.Provide(service.NewKBPermissionService))
+	// RBAC v2: role / group services + permission resolver.
+	// The resolver is injected into the auth middleware (via the router
+	// param) so user.EffectiveCache is populated for every authenticated
+	// request before any handler runs.
+	must(container.Provide(service.NewRoleService))
+	must(container.Provide(service.NewGroupService))
+	must(container.Provide(service.NewPermissionResolverService))
 	must(container.Provide(service.NewWeKnoraCloudService))
 
 	// Extract services - register individual extracters with names
@@ -306,6 +315,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewInvitationHandler))
 	must(container.Provide(handler.NewAdminUserHandler))
 	must(container.Provide(handler.NewKBPermissionHandler))
+	must(container.Provide(handler.NewAdminRoleHandler))
+	must(container.Provide(handler.NewAdminGroupHandler))
 
 	// Data source handler
 	must(container.Provide(handler.NewDataSourceHandler))

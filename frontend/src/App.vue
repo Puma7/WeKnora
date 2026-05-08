@@ -206,4 +206,28 @@ html,
     transform: translateZ(0);
     backface-visibility: hidden;
 }
+
+/*
+ * v-can / .permission-locked
+ *
+ * Applied by the v-can directive (src/directives/can.ts) when the current
+ * user lacks the required permission. The class dims the element and changes
+ * the cursor to a not-allowed indicator. The native title attribute (also
+ * set by the directive) renders the explanation tooltip — works on every
+ * element type without wrapping it in a TDesign Tooltip component.
+ *
+ * !important is needed because TDesign components ship cursor: pointer in
+ * their own scoped styles; without it the locked cursor wouldn't apply.
+ */
+.permission-locked {
+    opacity: 0.55;
+    cursor: not-allowed !important;
+    pointer-events: auto !important;
+}
+.permission-locked:hover {
+    opacity: 0.55;
+}
+.permission-locked > * {
+    pointer-events: none;
+}
 </style>
